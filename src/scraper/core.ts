@@ -274,21 +274,42 @@ export class ScraperCore {
       }
     }
 
-    // Mapear fotos ao doc mais próximo por msg ID
+    // Mapear fotos ao doc: mesmo remetente + distância próxima + máx 5 fotos
     const docPhotosMap = new Map<number, string[]>();
+    const MAX_PHOTOS_PER_DOC = 5;
+    const MAX_MESSAGE_DISTANCE = 50; // Apenas fotos dentro de ±50 mensagens
+
     for (const photoItem of photos) {
       const photoMsg = photoItem.message;
+      const photoSenderId = String(photoMsg.senderId || "unknown");
       const url = photoUrlsMap.get(photoMsg.id);
       if (!url) continue;
-      let closest: any = null, minDist = Infinity;
+
+      // Procurar doc do MESMO remetente, dentro da distância máxima
+      let bestMatch: any = null;
+      let bestDistance = Infinity;
+
       for (const docItem of docs) {
-        const d = Math.abs(docItem.message.id - photoMsg.id);
-        if (d < minDist) { minDist = d; closest = docItem.message; }
+        const docMsg = docItem.message;
+        const docSenderId = String(docMsg.senderId || "unknown");
+        const distance = Math.abs(docMsg.id - photoMsg.id);
+
+        // Deve ser do mesmo remetente E dentro da distância máxima
+        if (docSenderId === photoSenderId && distance <= MAX_MESSAGE_DISTANCE) {
+          if (distance < bestDistance) {
+            bestDistance = distance;
+            bestMatch = docMsg;
+          }
+        }
       }
-      if (closest) {
-        const list = docPhotosMap.get(closest.id) || [];
-        list.push(url);
-        docPhotosMap.set(closest.id, list);
+
+      if (bestMatch) {
+        const list = docPhotosMap.get(bestMatch.id) || [];
+        // Limitar a máximo 5 fotos por documento
+        if (list.length < MAX_PHOTOS_PER_DOC) {
+          list.push(url);
+          docPhotosMap.set(bestMatch.id, list);
+        }
       }
     }
 
