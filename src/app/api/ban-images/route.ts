@@ -18,9 +18,9 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    // Add to banned_images table
+    // Add to telegram_banned_images table
     const { error } = await supabase
-      .from("banned_images")
+      .from("telegram_banned_images")
       .insert({
         image_url,
         image_hash: image_hash || null,
