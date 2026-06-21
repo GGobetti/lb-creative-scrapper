@@ -133,6 +133,33 @@ async function runScan(client: TelegramClient, hoursBack: number = 24): Promise<
             continue;
           }
 
+          const { data: ex } = await supabase
+            .from("telegram_indexed_stls")
+            .select("id")
+            .eq("file_name", fileName)
+            .eq("file_size_bytes", fileSize)
+            .limit(1)
+            .maybeSingle();
+
+          if (ex) {
+            totalSkipped++;
+            continue;
+          }
+
+          const { data: exJob } = await supabase
+            .from("telegram_scraper_jobs")
+            .select("id")
+            .eq("file_name", fileName)
+            .eq("file_size_bytes", fileSize)
+            .in("status", ["downloading_file", "uploading_vault", "indexing", "pending_approval"])
+            .limit(1)
+            .maybeSingle();
+
+          if (exJob) {
+            totalSkipped++;
+            continue;
+          }
+
           newDocs.push(docItem);
           totalQueued++;
         }
