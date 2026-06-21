@@ -497,10 +497,18 @@ export class ScraperCore {
           console.log(`[Core] ✅ "${fileName}" indexado com sucesso!`);
         }
       } catch (e: any) {
-        console.error(`[Core] Erro ao processar doc: ${e.message}`);
-        await updateJob("failed", e.message);
-        if (tempFilePath && fs.existsSync(tempFilePath)) {
-          try { fs.unlinkSync(tempFilePath); } catch {}
+        // Ignorar erro de canal não encontrado (arquivo encaminhado de canal inacessível)
+        // O arquivo foi baixado com sucesso, apenas metadados do canal falharam
+        if (e.message?.includes("Could not find the input entity") ||
+            e.message?.includes("CHANNEL_INVALID")) {
+          console.warn(`[Core] ⚠️  "${fileName}" - canal de origem inacessível (ignorando erro)`);
+          // Continua o processamento normalmente
+        } else {
+          console.error(`[Core] Erro ao processar doc: ${e.message}`);
+          await updateJob("failed", e.message);
+          if (tempFilePath && fs.existsSync(tempFilePath)) {
+            try { fs.unlinkSync(tempFilePath); } catch {}
+          }
         }
       }
     }
