@@ -7,7 +7,12 @@ import { ScraperCore } from "../scraper/core";
 import { BufferedMessage } from "../scraper/types";
 
 function isEligibleDoc(msg: any): boolean {
-  if (!msg.media || !("document" in msg.media)) return false;
+  if (!msg.media) return false;
+
+  // Suporta ambas as estruturas
+  const hasDocument = "document" in msg.media || msg.media?.className === "MessageMediaDocument";
+  if (!hasDocument) return false;
+
   const doc = (msg.media as any).document;
   const attr = doc.attributes?.find((a: any) => "fileName" in a);
   const fileName = attr?.fileName || "";
