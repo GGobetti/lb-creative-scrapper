@@ -347,6 +347,12 @@ export class ScraperCore {
         if (attr) fileName = attr.fileName;
         const fileSize = Number(doc.size);
 
+        // Validação ANTES de criar job: arquivo DEVE ter pelo menos 1 foto
+        if (matchedPhotos.length === 0) {
+          console.log(`[Core] ⚠️  "${fileName}" rejeitado - sem fotos (não criou job)`);
+          continue;
+        }
+
         // Verificar duplicata no índice
         const { data: existing } = await this.supabase
           .from("telegram_indexed_stls")
@@ -409,16 +415,7 @@ export class ScraperCore {
           "Timeout ao enviar para Vault (25min)"
         );
 
-        // Validação 1: Arquivo DEVE ter pelo menos 1 foto
-        const hasPhotos = matchedPhotos.length > 0;
-        if (!hasPhotos) {
-          try { fs.unlinkSync(mediaData); } catch {}
-          await updateJob("failed", "Arquivo rejeitado: nenhuma foto associada");
-          console.log(`[Core] ⚠️  "${fileName}" rejeitado - sem fotos`);
-          continue;
-        }
-
-        // Validação 2: Calcular hash do arquivo ANTES de deletar
+        // Calcular hash do arquivo ANTES de deletar
         await updateJob("indexing");
         const fileBuffer = fs.readFileSync(mediaData);
         const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
