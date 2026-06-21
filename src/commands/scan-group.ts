@@ -129,7 +129,8 @@ export async function scanGroupCommand(args: { groupId: string; hours?: number }
 
     for (const msg of [...inWindow].reverse()) {
       const senderId = msg.senderId ? String(msg.senderId) : "unknown";
-      if (myId && senderId === myId) continue;
+      // NOTA: scan-group processa TUDO, inclusive mensagens do próprio user
+      // (o daemon filtra suas próprias mensagens para não reprocessar)
 
       const isDoc = isEligibleDoc(msg);
       const isPic = isPhoto(msg);
