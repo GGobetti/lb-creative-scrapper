@@ -22,6 +22,13 @@ async function runScan(client: TelegramClient, hoursBack: number = 24): Promise<
   const config = loadConfig();
 
   try {
+    // Atualizar heartbeat no INÍCIO para indicar que daemon está vivo
+    const supabaseHeartbeat = createClient(config.supabase.url, config.supabase.serviceRoleKey);
+    await supabaseHeartbeat
+      .from("telegram_scraper_settings")
+      .update({ last_heartbeat: new Date().toISOString() })
+      .eq("id", "default");
+
     console.log(`\n🔄 [${new Date().toLocaleTimeString("pt-BR")}] Iniciando scan das últimas ${hoursBack}h\n`);
 
     const me = await client.getMe();
@@ -172,12 +179,6 @@ async function runScan(client: TelegramClient, hoursBack: number = 24): Promise<
     }
 
     core.saveHashCache();
-
-    const supabaseHeartbeat = createClient(config.supabase.url, config.supabase.serviceRoleKey);
-    await supabaseHeartbeat
-      .from("telegram_scraper_settings")
-      .update({ last_heartbeat: new Date().toISOString() })
-      .eq("id", "default");
 
     console.log(`✅ Scan concluído em ${new Date().toLocaleTimeString("pt-BR")}`);
     console.log(`   📥 ${totalQueued} arquivo(s) processado(s)`);
