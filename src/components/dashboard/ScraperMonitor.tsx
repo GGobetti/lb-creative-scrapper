@@ -86,13 +86,13 @@ export function ScraperMonitor() {
 
   const handleBulkDeleteJobs = async () => {
     if (selectedJobs.length === 0) return
-    if (!confirm(`Deletar ${selectedJobs.length} arquivo(s)? Isso não pode ser desfeito!`)) return
+    if (!confirm(`Deletar ${selectedJobs.length} arquivo(s) da fila? Isso não pode ser desfeito!`)) return
 
     let successCount = 0
     try {
       for (const jobId of selectedJobs) {
         try {
-          const response = await fetch("/api/delete-model", {
+          const response = await fetch("/api/delete-job", {
             method: "DELETE",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ id: jobId })
