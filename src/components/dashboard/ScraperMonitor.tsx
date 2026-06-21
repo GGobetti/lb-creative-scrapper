@@ -45,6 +45,17 @@ export function ScraperMonitor() {
     }
   }, [])
 
+  const fetchGroups = useCallback(async () => {
+    try {
+      const response = await fetch("/api/groups")
+      if (!response.ok) throw new Error("Failed to fetch groups")
+      const data = await response.json()
+      setGroups(data.groups || [])
+    } catch (err) {
+      console.error("Erro ao carregar grupos:", err)
+    }
+  }, [])
+
   const fetchSettings = useCallback(async () => {
     try {
       const response = await fetch("/api/settings")
@@ -75,12 +86,14 @@ export function ScraperMonitor() {
   useEffect(() => {
     fetchJobs()
     fetchSettings()
+    fetchGroups()
     const interval = setInterval(() => {
       fetchJobs()
       fetchSettings()
+      fetchGroups()
     }, 5000)
     return () => clearInterval(interval)
-  }, [fetchJobs, fetchSettings])
+  }, [fetchJobs, fetchSettings, fetchGroups])
 
   const getScraperStatus = (): "healthy" | "warning" | "offline" | "unknown" => {
     if (!scraperHeartbeat) return "unknown"
@@ -634,11 +647,26 @@ export function ScraperMonitor() {
                       <p className="text-xs text-muted-foreground mt-2">Exemplo: @meugrupo ou t.me/meugrupo ou -1001234567890</p>
                     </div>
                     <button
-                      onClick={() => {
+                      onClick={async () => {
                         if (newGroupUrl.trim()) {
-                          alert(`Grupo adicionado: ${newGroupUrl}\n\nNota: A adição de grupos requer reinicialização do scraper.`)
-                          setNewGroupUrl("")
-                          setShowAddGroup(false)
+                          try {
+                            const response = await fetch("/api/groups", {
+                              method: "POST",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ groupId: newGroupUrl.trim() })
+                            })
+                            if (response.ok) {
+                              alert(`Grupo adicionado: ${newGroupUrl}\n\nNota: A adição de grupos requer reinicialização do scraper.`)
+                              setNewGroupUrl("")
+                              setShowAddGroup(false)
+                              fetchGroups()
+                            } else {
+                              const error = await response.json()
+                              alert(`Erro: ${error.error}`)
+                            }
+                          } catch (err) {
+                            alert("Erro ao adicionar grupo")
+                          }
                         }
                       }}
                       className="w-full py-2 bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-bold rounded-lg cursor-pointer transition-all"
@@ -662,44 +690,58 @@ export function ScraperMonitor() {
                       </tr>
                     </thead>
                     <tbody>
-                      {[
-                        { name: "STL 3D Brasil Free", id: "2436118005", active: true, lastScan: "2026-06-21 08:45", jobs: 12 },
-                        { name: "3D E STL SEM FREXCURA", id: "2718125777", active: true, lastScan: "2026-06-21 08:50", jobs: 5 },
-                        { name: "All STL - Brasil", id: "789456123", active: true, lastScan: "2026-06-21 08:40", jobs: 8 },
-                        { name: "3D Designs Community", id: "654321987", active: false, lastScan: "2026-06-20 20:15", jobs: 0 },
-                      ].map(group => (
-                        <tr key={group.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                          <td className="px-6 py-4">
-                            <div>
-                              <p className="text-sm font-medium text-foreground">{group.name}</p>
-                              <p className="text-xs text-muted-foreground">{group.id}</p>
-                            </div>
-                          </td>
-                          <td className="px-6 py-4">
-                            <span className={`px-3 py-1 rounded-full text-xs font-bold ${
-                              group.active
-                                ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
-                                : "bg-zinc-500/10 border border-zinc-500/20 text-zinc-400"
-                            }`}>
-                              {group.active ? "Ativo" : "Inativo"}
-                            </span>
-                          </td>
-                          <td className="px-6 py-4">
-                            <p className="text-sm text-muted-foreground">{group.lastScan}</p>
-                          </td>
-                          <td className="px-6 py-4">
-                            <p className="text-sm font-bold text-foreground">{group.jobs}</p>
-                          </td>
-                          <td className="px-6 py-4">
-                            <button
-                              onClick={() => alert(`Deletado: ${group.name}`)}
-                              className="text-xs px-3 py-1 text-rose-400 hover:bg-rose-500/10 border border-rose-500/20 rounded-lg cursor-pointer transition-all"
-                            >
-                              Deletar
-                            </button>
+                      {groups.length === 0 ? (
+                        <tr>
+                          <td colSpan={5} className="px-6 py-4 text-center text-muted-foreground">
+                            Nenhum grupo configurado
                           </td>
                         </tr>
-                      ))}
+                      ) : (
+                        groups.map(group => (
+                          <tr key={group.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                            <td className="px-6 py-4">
+                              <div>
+                                <p className="text-sm font-medium text-foreground">{group.name}</p>
+                                <p className="text-xs text-muted-foreground">{group.type}</p>
+                              </div>
+                            </td>
+                            <td className="px-6 py-4">
+                              <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+                                group.active
+                                  ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
+                                  : "bg-zinc-500/10 border border-zinc-500/20 text-zinc-400"
+                              }`}>
+                                {group.active ? "Ativo" : "Inativo"}
+                              </span>
+                            </td>
+                            <td className="px-6 py-4">
+                              <p className="text-sm text-muted-foreground">-</p>
+                            </td>
+                            <td className="px-6 py-4">
+                              <p className="text-sm font-bold text-foreground">{group.jobsCount || 0}</p>
+                            </td>
+                            <td className="px-6 py-4">
+                              <button
+                                onClick={async () => {
+                                  if (confirm(`Deletar grupo: ${group.name}?`)) {
+                                    const response = await fetch("/api/groups", {
+                                      method: "DELETE",
+                                      headers: { "Content-Type": "application/json" },
+                                      body: JSON.stringify({ groupId: group.id })
+                                    })
+                                    if (response.ok) {
+                                      fetchGroups()
+                                    }
+                                  }
+                                }}
+                                className="text-xs px-3 py-1 text-rose-400 hover:bg-rose-500/10 border border-rose-500/20 rounded-lg cursor-pointer transition-all"
+                              >
+                                Deletar
+                              </button>
+                            </td>
+                          </tr>
+                        ))
+                      )}
                     </tbody>
                   </table>
                 </div>
