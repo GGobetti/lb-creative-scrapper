@@ -19,11 +19,13 @@ export async function DELETE(request: NextRequest) {
     }
 
     // Buscar job antes de deletar para pegar arquivo
-    const { data: job } = await supabase
+    const { data: job, error: fetchErr } = await supabase
       .from("telegram_scraper_jobs")
       .select("file_name, file_size_bytes")
       .eq("id", id)
-      .single();
+      .maybeSingle();
+
+    if (fetchErr) throw fetchErr;
 
     // Deletar job
     const { error: deleteErr } = await supabase
@@ -35,16 +37,18 @@ export async function DELETE(request: NextRequest) {
 
     // Adicionar à blacklist para não processar novamente
     if (job) {
-      await supabase
+      const { error: blacklistErr } = await supabase
         .from("user_deleted_files")
         .insert({
           file_name: job.file_name,
           file_size_bytes: job.file_size_bytes,
           deleted_at: new Date().toISOString()
-        })
-        .catch(() => {
-          // Tabela pode não existir ainda, ignora
         });
+
+      // Se a tabela não existe, apenas loga mas não falha
+      if (blacklistErr && !blacklistErr.message.includes("user_deleted_files")) {
+        throw blacklistErr;
+      }
     }
 
     return NextResponse.json({
