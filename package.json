@@ -1,15 +1,16 @@
 {
   "name": "lb-creative-scrapper",
   "version": "1.0.0",
+  "type": "module",
   "description": "CLI para escanear grupos Telegram e indexar STLs no LB Creative Studio",
   "main": "dist/index.js",
   "scripts": {
     "dev": "next dev -p 3001",
-    "dev:scan": "ts-node src/index.ts",
+    "dev:scan": "tsx src/index.ts",
     "build": "next build",
     "start": "next start -p 3001",
-    "scan": "ts-node src/index.ts scan",
-    "scan:48h": "ts-node src/index.ts scan --hours 48"
+    "scan": "tsx src/index.ts scan",
+    "scan:48h": "tsx src/index.ts scan --hours 48"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.17",
@@ -38,6 +39,7 @@
     "@types/yargs": "^17.0.24",
     "@vitejs/plugin-react": "^6.0.2",
     "ts-node": "^10.9.2",
+    "tsx": "^4.22.4",
     "typescript": "^5.3.3",
     "vite": "^8.0.16"
   }
