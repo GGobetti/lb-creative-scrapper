@@ -110,9 +110,11 @@ export async function scanGroupCommand(args: { groupId: string; hours?: number }
       } else {
         otherCount++;
         console.log(`  🔹 OUTRO (${mediaType})`);
-        console.log(`     Keys: ${Object.keys(msg).slice(0, 5).join(", ")}`);
-        if (msg.media) {
-          console.log(`     Media Keys: ${Object.keys(msg.media).slice(0, 5).join(", ")}`);
+        console.log(`     Tem fwd_from? ${msg.fwdFrom ? "SIM ✓" : "NÃO"}`);
+        console.log(`     Tem grouped_id? ${msg.groupedId ? "SIM ✓" : "NÃO"}`);
+        console.log(`     className: ${msg.className}`);
+        if (msg.fwdFrom) {
+          console.log(`     Forward from: ${msg.fwdFrom.fromName || msg.fwdFrom.fromId}`);
         }
       }
     }
