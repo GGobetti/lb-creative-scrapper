@@ -359,14 +359,28 @@ export class ScraperCore {
         }
 
         // Verificar duplicata no índice (apenas arquivos NÃO deletados)
-        const { data: existing } = await this.supabase
-          .from("telegram_indexed_stls")
-          .select("id")
-          .eq("file_name", fileName)
-          .eq("file_size_bytes", fileSize)
-          .eq("is_deleted", false)
-          .limit(1)
-          .maybeSingle();
+        let existing = null;
+        try {
+          const result = await this.supabase
+            .from("telegram_indexed_stls")
+            .select("id")
+            .eq("file_name", fileName)
+            .eq("file_size_bytes", fileSize)
+            .eq("is_deleted", false)
+            .limit(1)
+            .maybeSingle();
+          existing = result.data;
+        } catch (e) {
+          // Coluna is_deleted pode não existir ainda - tenta sem ela
+          const result = await this.supabase
+            .from("telegram_indexed_stls")
+            .select("id")
+            .eq("file_name", fileName)
+            .eq("file_size_bytes", fileSize)
+            .limit(1)
+            .maybeSingle();
+          existing = result.data;
+        }
 
         if (existing) {
           console.log(`[Core] ⏩ ${fileName} já indexado - ignorando (arquivo + fotos)`);
@@ -427,13 +441,26 @@ export class ScraperCore {
         const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
 
         // Verificar se arquivo com mesmo hash já existe (apenas NÃO deletados)
-        const { data: existingByHash } = await this.supabase
-          .from("telegram_indexed_stls")
-          .select("id, file_name")
-          .eq("file_hash", fileHash)
-          .eq("is_deleted", false)
-          .limit(1)
-          .maybeSingle();
+        let existingByHash = null;
+        try {
+          const result = await this.supabase
+            .from("telegram_indexed_stls")
+            .select("id, file_name")
+            .eq("file_hash", fileHash)
+            .eq("is_deleted", false)
+            .limit(1)
+            .maybeSingle();
+          existingByHash = result.data;
+        } catch (e) {
+          // Coluna is_deleted pode não existir ainda - tenta sem ela
+          const result = await this.supabase
+            .from("telegram_indexed_stls")
+            .select("id, file_name")
+            .eq("file_hash", fileHash)
+            .limit(1)
+            .maybeSingle();
+          existingByHash = result.data;
+        }
 
         if (existingByHash) {
           try { fs.unlinkSync(mediaData); } catch {}
