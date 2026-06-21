@@ -409,17 +409,16 @@ export class ScraperCore {
           "Timeout ao enviar para Vault (25min)"
         );
 
-        try { fs.unlinkSync(mediaData); } catch {}
-
         // Validação 1: Arquivo DEVE ter pelo menos 1 foto
         const hasPhotos = matchedPhotos.length > 0;
         if (!hasPhotos) {
+          try { fs.unlinkSync(mediaData); } catch {}
           await updateJob("failed", "Arquivo rejeitado: nenhuma foto associada");
           console.log(`[Core] ⚠️  "${fileName}" rejeitado - sem fotos`);
           continue;
         }
 
-        // Validação 2: Calcular hash do arquivo para detectar duplicatas
+        // Validação 2: Calcular hash do arquivo ANTES de deletar
         await updateJob("indexing");
         const fileBuffer = fs.readFileSync(mediaData);
         const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
@@ -433,10 +432,14 @@ export class ScraperCore {
           .maybeSingle();
 
         if (existingByHash) {
+          try { fs.unlinkSync(mediaData); } catch {}
           await updateJob("failed", `Duplicata do arquivo "${existingByHash.file_name}"`);
           console.log(`[Core] 🔄 "${fileName}" é duplicata de "${existingByHash.file_name}"`);
           continue;
         }
+
+        // Agora pode deletar
+        try { fs.unlinkSync(mediaData); } catch {}
 
         const thumbnail_url = matchedPhotos[0];
 
