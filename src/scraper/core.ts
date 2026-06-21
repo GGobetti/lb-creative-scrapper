@@ -290,22 +290,21 @@ export class ScraperCore {
       const url = photoUrlsMap.get(photoMsg.id);
       if (!url) continue;
 
-      // Procurar doc do MESMO remetente, dentro da janela de tempo
+      // Procurar doc dentro da janela de tempo (janela temporal é suficiente)
       let bestMatch: any = null;
       let bestTimeDiff = Infinity;
 
       for (const docItem of docs) {
         const docMsg = docItem.message;
-        const docSenderId = String(docMsg.senderId || "unknown");
         const docTime = typeof docMsg.date === "number"
           ? docMsg.date
           : Math.floor(new Date(docMsg.date).getTime() / 1000);
 
         const timeDiff = docTime - photoTime; // Arquivo menos foto (pode ser negativo)
 
-        // Mesma pessoa E foto entre 30s antes até 5s depois do arquivo
-        if (docSenderId === photoSenderId &&
-            timeDiff >= -PHOTO_WINDOW_BEFORE_SECONDS &&
+        // Foto entre 30s antes até 5s depois do arquivo
+        // (Remetente pode ser diferente se foto/arquivo foram encaminhados)
+        if (timeDiff >= -PHOTO_WINDOW_BEFORE_SECONDS &&
             timeDiff <= PHOTO_WINDOW_AFTER_SECONDS) {
           // Encontrar o arquivo mais próximo
           if (Math.abs(timeDiff) < Math.abs(bestTimeDiff)) {
