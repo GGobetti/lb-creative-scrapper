@@ -245,13 +245,28 @@ export function ScraperMonitor() {
 
   const allPhotos = useMemo(() => {
     const seen = new Set<string>()
-    const photos: { jobId: string; url: string; jobTitle: string }[] = []
+    const photos: { jobId: string; url: string; jobTitle: string; count?: number }[] = []
+    const urlToCount = new Map<string, number>()
+
+    // Primeiro pass: contar ocorrências por URL
     scraperJobs.forEach(job => {
       (job.photos || []).forEach((url: string) => {
-        const key = `${job.id}|${url}`
-        if (!seen.has(key) && !dismissedPhotos.includes(key)) {
-          seen.add(key)
-          photos.push({ jobId: job.id, url, jobTitle: job.file_name })
+        urlToCount.set(url, (urlToCount.get(url) || 0) + 1)
+      })
+    })
+
+    // Segundo pass: adicionar fotos únicas por URL
+    scraperJobs.forEach(job => {
+      (job.photos || []).forEach((url: string) => {
+        const photoKey = `${url}` // Deduplica por URL, não jobId
+        if (!seen.has(photoKey) && !dismissedPhotos.includes(photoKey)) {
+          seen.add(photoKey)
+          photos.push({
+            jobId: job.id,
+            url,
+            jobTitle: job.file_name,
+            count: urlToCount.get(url) // Quantas vezes aparece
+          })
         }
       })
     })
@@ -608,6 +623,11 @@ export function ScraperMonitor() {
                           }`}>
                             {isSelected && "✓"}
                           </div>
+                          {photo.count && photo.count > 1 && (
+                            <div className="absolute bottom-2 left-2 bg-blue-500/80 text-white text-xs font-bold px-2 py-1 rounded">
+                              ×{photo.count}
+                            </div>
+                          )}
                         </div>
                       )
                     })}
