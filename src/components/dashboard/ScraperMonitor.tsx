@@ -1,7 +1,7 @@
 "use client"
 
 import React, { useState, useEffect, useCallback, useMemo } from "react"
-import { RefreshCw, Loader2, Settings, Shield } from "lucide-react"
+import { RefreshCw, Loader2, Settings, Shield, Trash2, Ban, Eye } from "lucide-react"
 
 interface ScraperJob {
   id: string
@@ -29,6 +29,7 @@ export function ScraperMonitor() {
   const [selectedBans, setSelectedBans] = useState<string[]>([])
   const [dismissedPhotos, setDismissedPhotosState] = useState<string[]>([])
   const [isBanningPhotos, setIsBanningPhotos] = useState(false)
+  const [actingJobId, setActingJobId] = useState<string | null>(null)
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -52,6 +53,21 @@ export function ScraperMonitor() {
       console.error("Erro ao carregar configurações:", err)
     }
   }, [])
+
+  useEffect(() => {
+    if (typeof window === "undefined") return
+    const saved = localStorage.getItem("dismissedAdminPhotos")
+    if (saved) {
+      try {
+        setDismissedPhotosState(JSON.parse(saved))
+      } catch {}
+    }
+  }, [])
+
+  const persistDismissed = (next: string[]) => {
+    setDismissedPhotosState(next)
+    if (typeof window !== "undefined") localStorage.setItem("dismissedAdminPhotos", JSON.stringify(next))
+  }
 
   useEffect(() => {
     fetchJobs()
@@ -89,6 +105,7 @@ export function ScraperMonitor() {
       indexing: scraperJobs.filter(j => j.status === "indexing").length,
       completed: scraperJobs.filter(j => j.status === "completed").length,
       failed: scraperJobs.filter(j => j.status === "failed").length,
+      pending_approval: scraperJobs.filter(j => j.status === "pending_approval").length,
     }
   }, [scraperJobs])
 
@@ -105,6 +122,7 @@ export function ScraperMonitor() {
       case "completed": return "Concluído"
       case "failed": return "Falhou"
       case "pending": return "Na Fila"
+      case "pending_approval": return "Aguardando Aprovação"
       default: return status
     }
   }
@@ -117,6 +135,7 @@ export function ScraperMonitor() {
       case "indexing": return "bg-amber-500/10 border border-amber-500/20 text-amber-400"
       case "completed": return "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
       case "failed": return "bg-rose-500/10 border border-rose-500/20 text-rose-400"
+      case "pending_approval": return "bg-orange-500/10 border border-orange-500/20 text-orange-400"
       default: return "bg-zinc-500/10 border border-zinc-500/20 text-zinc-400"
     }
   }
@@ -137,6 +156,7 @@ export function ScraperMonitor() {
   }
 
   const handleApproveJob = async (jobId: string) => {
+    setActingJobId(jobId)
     try {
       const res = await fetch("/api/jobs", {
         method: "POST",
@@ -147,10 +167,13 @@ export function ScraperMonitor() {
       await fetchJobs()
     } catch (err: any) {
       alert(`Erro ao aprovar: ${err.message}`)
+    } finally {
+      setActingJobId(null)
     }
   }
 
   const handleRejectJob = async (jobId: string) => {
+    setActingJobId(jobId)
     try {
       const res = await fetch("/api/jobs", {
         method: "POST",
@@ -161,8 +184,65 @@ export function ScraperMonitor() {
       await fetchJobs()
     } catch (err: any) {
       alert(`Erro ao rejeitar: ${err.message}`)
+    } finally {
+      setActingJobId(null)
     }
   }
+
+  const handleBanPhotos = async () => {
+    if (selectedBans.length === 0) return
+    if (!confirm(`Banir ${selectedBans.length} imagem(ns)?`)) return
+    setIsBanningPhotos(true)
+
+    let successCount = 0
+    try {
+      for (const key of selectedBans) {
+        const pipeIdx = key.indexOf("|")
+        const url = key.slice(pipeIdx + 1)
+        try {
+          const res = await fetch("/api/ban-images", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ image_url: url })
+          })
+          if (!res.ok) throw new Error("Failed to ban image")
+          successCount++
+        } catch (err) {
+          console.error("Erro ao banir imagem:", err)
+        }
+      }
+
+      persistDismissed([...dismissedPhotos, ...selectedBans])
+      setSelectedBans([])
+
+      if (successCount === selectedBans.length) {
+        alert(`${successCount} foto(s) banida(s) com sucesso!`)
+      } else {
+        alert(`${successCount} de ${selectedBans.length} fotos banidas.`)
+      }
+    } catch (err: any) {
+      alert(`Erro ao banir: ${err.message}`)
+    } finally {
+      setIsBanningPhotos(false)
+    }
+  }
+
+  const allPhotos = useMemo(() => {
+    const seen = new Set<string>()
+    const photos: { jobId: string; url: string; jobTitle: string }[] = []
+    scraperJobs.forEach(job => {
+      (job.photos || []).forEach((url: string) => {
+        const key = `${job.id}|${url}`
+        if (!seen.has(key) && !dismissedPhotos.includes(key)) {
+          seen.add(key)
+          photos.push({ jobId: job.id, url, jobTitle: job.file_name })
+        }
+      })
+    })
+    return photos
+  }, [scraperJobs, dismissedPhotos])
+
+  const pendingApprovalJobs = scraperJobs.filter(j => j.status === "pending_approval")
 
   return (
     <div className="min-h-screen bg-background p-6">
@@ -204,7 +284,7 @@ export function ScraperMonitor() {
         </div>
 
         {/* Tabs */}
-        <div className="mb-8 flex gap-4 border-b border-border/40 pb-0">
+        <div className="mb-8 flex gap-4 border-b border-border/40 pb-0 flex-wrap">
           <button
             onClick={() => setActiveTab("approvals")}
             className={`px-6 py-4 font-bold text-sm transition-all border-b-2 ${
@@ -213,7 +293,7 @@ export function ScraperMonitor() {
                 : "text-muted-foreground border-b-transparent hover:text-foreground"
             }`}
           >
-            Aprovações e Moderação
+            Aprovações e Moderação {statusCounts.pending_approval > 0 && <span className="ml-2 bg-orange-500/20 px-2 py-1 rounded text-orange-400 text-xs">{statusCounts.pending_approval}</span>}
           </button>
           <button
             onClick={() => setActiveTab("history")}
@@ -398,18 +478,179 @@ export function ScraperMonitor() {
         )}
 
         {activeTab === "approvals" && (
-          <div className="py-12 text-center">
-            <Shield size={48} className="mx-auto mb-4 text-muted-foreground opacity-50" />
-            <p className="text-muted-foreground text-lg">Fila de aprovação e moderação de fotos</p>
-            <p className="text-sm text-muted-foreground mt-2">Em desenvolvimento...</p>
+          <div className="space-y-8">
+            {/* Approval Queue */}
+            <div>
+              <h2 className="text-xl font-bold text-foreground mb-4">Fila de Aprovação</h2>
+              {pendingApprovalJobs.length === 0 ? (
+                <div className="border border-dashed border-border rounded-2xl p-8 text-center">
+                  <p className="text-muted-foreground">Nenhum arquivo aguardando aprovação</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                  {pendingApprovalJobs.map(job => (
+                    <div key={job.id} className="border border-border rounded-2xl overflow-hidden bg-card/50 hover:border-orange-500/30 transition-all">
+                      {job.photos?.length ? (
+                        <div className="relative aspect-video w-full bg-muted/50 overflow-hidden">
+                          <img src={job.photos[0]} alt={job.file_name} className="w-full h-full object-cover" />
+                          <div className="absolute top-3 right-3 px-3 py-1 rounded bg-black/70 backdrop-blur-sm text-xs font-bold text-orange-400">
+                            {formatFileSize(job.file_size_bytes)}
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="aspect-video w-full bg-muted/50 flex items-center justify-center">
+                          <p className="text-muted-foreground text-sm">Sem foto</p>
+                        </div>
+                      )}
+                      <div className="p-5">
+                        <h3 className="font-bold text-sm text-foreground mb-2 line-clamp-2">{job.file_name}</h3>
+                        <p className="text-xs text-muted-foreground mb-4">{job.chat_title}</p>
+                        <div className="grid grid-cols-2 gap-3">
+                          <button
+                            onClick={() => handleApproveJob(job.id)}
+                            disabled={actingJobId === job.id}
+                            className="py-2 bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                          >
+                            {actingJobId === job.id ? <Loader2 size={12} className="animate-spin" /> : "✅"} Aprovar
+                          </button>
+                          <button
+                            onClick={() => handleRejectJob(job.id)}
+                            disabled={actingJobId === job.id}
+                            className="py-2 bg-rose-500/10 hover:bg-rose-500/20 disabled:opacity-50 text-rose-400 border border-rose-500/20 text-xs font-bold rounded-xl flex items-center justify-center gap-1.5 transition-all cursor-pointer"
+                          >
+                            ❌ Rejeitar
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Photo Moderation */}
+            <div className="border-t border-border pt-8">
+              <h2 className="text-xl font-bold text-foreground mb-4">Moderação de Fotos</h2>
+              {allPhotos.length === 0 ? (
+                <div className="border border-dashed border-border rounded-2xl p-8 text-center">
+                  <p className="text-muted-foreground">Nenhuma foto para moderar</p>
+                </div>
+              ) : (
+                <div className="space-y-4">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <button
+                      onClick={() => setSelectedBans(selectedBans.length === allPhotos.length ? [] : allPhotos.map((p, i) => `${p.jobId}|${p.url}`))}
+                      className="px-3 py-1.5 bg-muted hover:bg-muted/80 text-foreground text-xs font-bold rounded-lg border border-border cursor-pointer transition-all"
+                    >
+                      {selectedBans.length === allPhotos.length ? "Desmarcar Todos" : "Selecionar Todos"}
+                    </button>
+                    {selectedBans.length > 0 && (
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => { persistDismissed([...dismissedPhotos, ...selectedBans]); setSelectedBans([]) }}
+                          className="px-4 py-2 bg-zinc-600 hover:bg-zinc-500 text-white text-xs font-bold rounded-xl cursor-pointer transition-all flex items-center gap-2"
+                        >
+                          <Eye size={14} /> Ignorar ({selectedBans.length})
+                        </button>
+                        <button
+                          onClick={handleBanPhotos}
+                          disabled={isBanningPhotos}
+                          className="px-4 py-2 bg-red-600 hover:bg-red-500 disabled:opacity-50 text-white text-xs font-bold rounded-xl cursor-pointer transition-all flex items-center gap-2"
+                        >
+                          {isBanningPhotos ? <Loader2 size={14} className="animate-spin" /> : <Ban size={14} />} Banir ({selectedBans.length})
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-4">
+                    {allPhotos.map((photo, idx) => {
+                      const key = `${photo.jobId}|${photo.url}`
+                      const isSelected = selectedBans.includes(key)
+                      return (
+                        <div
+                          key={`${photo.jobId}-${idx}`}
+                          onClick={() => setSelectedBans(prev => prev.includes(key) ? prev.filter(k => k !== key) : [...prev, key])}
+                          className={`group relative aspect-square rounded-xl overflow-hidden bg-muted border-2 cursor-pointer transition-all ${
+                            isSelected ? "border-red-500 scale-95" : "border-border hover:border-red-500/50"
+                          }`}
+                        >
+                          <img
+                            src={photo.url}
+                            alt="photo"
+                            className={`w-full h-full object-cover ${isSelected ? "opacity-80" : ""}`}
+                            onError={e => {
+                              (e.currentTarget as HTMLImageElement).style.display = "none"
+                              const el = document.createElement("span")
+                              el.className = "text-xs text-red-400 font-bold p-2 text-center absolute inset-0 flex items-center justify-center"
+                              el.innerText = "Expirada"
+                              e.currentTarget.parentElement?.appendChild(el)
+                            }}
+                          />
+                          <div className={`absolute top-2 right-2 w-6 h-6 rounded-full flex items-center justify-center border-2 transition-colors ${
+                            isSelected ? "bg-red-500 border-red-500 text-white" : "bg-black/50 border-white/50 opacity-0 group-hover:opacity-100"
+                          }`}>
+                            {isSelected && "✓"}
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         )}
 
         {activeTab === "settings" && (
-          <div className="py-12 text-center">
-            <Settings size={48} className="mx-auto mb-4 text-muted-foreground opacity-50" />
-            <p className="text-muted-foreground text-lg">Configuração dos grupos Telegram</p>
-            <p className="text-sm text-muted-foreground mt-2">Em desenvolvimento...</p>
+          <div className="space-y-8">
+            {/* Limits */}
+            <div>
+              <h2 className="text-xl font-bold text-foreground mb-4">Limites de Tamanho</h2>
+              <div className="bg-card border border-border rounded-2xl p-6">
+                <div className="space-y-4">
+                  <div>
+                    <label className="text-sm font-bold text-foreground block mb-2">Limite de arquivo (MB)</label>
+                    <input
+                      type="number"
+                      defaultValue={scraperSettings?.size_limit_mb || 750}
+                      disabled
+                      className="w-full px-4 py-2 rounded-lg border border-border bg-muted/30 text-foreground text-sm disabled:opacity-50"
+                    />
+                    <p className="text-xs text-muted-foreground mt-2">Arquivos acima deste limite aguardam aprovação</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Activity */}
+            <div>
+              <h2 className="text-xl font-bold text-foreground mb-4">Atividade do Scraper</h2>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="bg-card border border-border rounded-2xl p-6">
+                  <p className="text-xs text-muted-foreground uppercase font-bold mb-2">Último Heartbeat</p>
+                  <p className="text-lg font-bold text-foreground">
+                    {scraperHeartbeat ? new Date(scraperHeartbeat).toLocaleString("pt-BR") : "N/A"}
+                  </p>
+                </div>
+                <div className="bg-card border border-border rounded-2xl p-6">
+                  <p className="text-xs text-muted-foreground uppercase font-bold mb-2">Jobs Processados</p>
+                  <p className="text-lg font-bold text-foreground">{statusCounts.total}</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Info */}
+            <div>
+              <h2 className="text-xl font-bold text-foreground mb-4">Informações</h2>
+              <div className="bg-card border border-border rounded-2xl p-6 text-sm text-muted-foreground space-y-2">
+                <p>✅ <strong>Pollingde status:</strong> 5 segundos</p>
+                <p>✅ <strong>Sincronização Supabase:</strong> Realtime com websocket</p>
+                <p>✅ <strong>Storage:</strong> Vault + Supabase</p>
+                <p>✅ <strong>Moderation:</strong> Hash perceptual para foto-ban</p>
+                <p className="text-xs text-muted-foreground/70 mt-4">Dashboard versão 1.0 • Atualizado em tempo real</p>
+              </div>
+            </div>
           </div>
         )}
       </div>
