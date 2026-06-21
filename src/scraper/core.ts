@@ -274,10 +274,11 @@ export class ScraperCore {
       }
     }
 
-    // Mapear fotos ao doc: mesmo remetente + tempo próximo + máx 5 fotos
+    // Mapear fotos ao doc: mesmo remetente + 30s antes até 5s depois + máx 5 fotos
     const docPhotosMap = new Map<number, string[]>();
     const MAX_PHOTOS_PER_DOC = 5;
-    const MAX_PHOTO_TIME_DELTA_SECONDS = 5; // Fotos até 5 segundos após o arquivo
+    const PHOTO_WINDOW_BEFORE_SECONDS = 30; // Fotos até 30s ANTES do arquivo
+    const PHOTO_WINDOW_AFTER_SECONDS = 5;   // Fotos até 5s APÓS do arquivo
 
     for (const photoItem of photos) {
       const photoMsg = photoItem.message;
@@ -288,7 +289,7 @@ export class ScraperCore {
       const url = photoUrlsMap.get(photoMsg.id);
       if (!url) continue;
 
-      // Procurar doc do MESMO remetente, postado até 5s antes da foto
+      // Procurar doc do MESMO remetente, dentro da janela de tempo
       let bestMatch: any = null;
       let bestTimeDiff = Infinity;
 
@@ -299,12 +300,14 @@ export class ScraperCore {
           ? docMsg.date
           : Math.floor(new Date(docMsg.date).getTime() / 1000);
 
-        // Foto deve ser após o arquivo (ou muito próxima) e dentro da janela de tempo
-        const timeDiff = photoTime - docTime;
+        const timeDiff = docTime - photoTime; // Arquivo menos foto (pode ser negativo)
 
-        // Deve ser do MESMO remetente E foto postada até MAX_PHOTO_TIME_DELTA_SECONDS depois
-        if (docSenderId === photoSenderId && timeDiff >= 0 && timeDiff <= MAX_PHOTO_TIME_DELTA_SECONDS) {
-          if (timeDiff < bestTimeDiff) {
+        // Mesma pessoa E foto entre 30s antes até 5s depois do arquivo
+        if (docSenderId === photoSenderId &&
+            timeDiff >= -PHOTO_WINDOW_BEFORE_SECONDS &&
+            timeDiff <= PHOTO_WINDOW_AFTER_SECONDS) {
+          // Encontrar o arquivo mais próximo
+          if (Math.abs(timeDiff) < Math.abs(bestTimeDiff)) {
             bestTimeDiff = timeDiff;
             bestMatch = docMsg;
           }
