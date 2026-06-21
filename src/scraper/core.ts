@@ -274,30 +274,38 @@ export class ScraperCore {
       }
     }
 
-    // Mapear fotos ao doc: mesmo remetente + distância próxima + máx 5 fotos
+    // Mapear fotos ao doc: mesmo remetente + tempo próximo + máx 5 fotos
     const docPhotosMap = new Map<number, string[]>();
     const MAX_PHOTOS_PER_DOC = 5;
-    const MAX_MESSAGE_DISTANCE = 50; // Apenas fotos dentro de ±50 mensagens
+    const MAX_PHOTO_TIME_DELTA_SECONDS = 5; // Fotos até 5 segundos após o arquivo
 
     for (const photoItem of photos) {
       const photoMsg = photoItem.message;
       const photoSenderId = String(photoMsg.senderId || "unknown");
+      const photoTime = typeof photoMsg.date === "number"
+        ? photoMsg.date
+        : Math.floor(new Date(photoMsg.date).getTime() / 1000);
       const url = photoUrlsMap.get(photoMsg.id);
       if (!url) continue;
 
-      // Procurar doc do MESMO remetente, dentro da distância máxima
+      // Procurar doc do MESMO remetente, postado até 5s antes da foto
       let bestMatch: any = null;
-      let bestDistance = Infinity;
+      let bestTimeDiff = Infinity;
 
       for (const docItem of docs) {
         const docMsg = docItem.message;
         const docSenderId = String(docMsg.senderId || "unknown");
-        const distance = Math.abs(docMsg.id - photoMsg.id);
+        const docTime = typeof docMsg.date === "number"
+          ? docMsg.date
+          : Math.floor(new Date(docMsg.date).getTime() / 1000);
 
-        // Deve ser do mesmo remetente E dentro da distância máxima
-        if (docSenderId === photoSenderId && distance <= MAX_MESSAGE_DISTANCE) {
-          if (distance < bestDistance) {
-            bestDistance = distance;
+        // Foto deve ser após o arquivo (ou muito próxima) e dentro da janela de tempo
+        const timeDiff = photoTime - docTime;
+
+        // Deve ser do MESMO remetente E foto postada até MAX_PHOTO_TIME_DELTA_SECONDS depois
+        if (docSenderId === photoSenderId && timeDiff >= 0 && timeDiff <= MAX_PHOTO_TIME_DELTA_SECONDS) {
+          if (timeDiff < bestTimeDiff) {
+            bestTimeDiff = timeDiff;
             bestMatch = docMsg;
           }
         }
