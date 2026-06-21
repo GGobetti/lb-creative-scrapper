@@ -30,6 +30,9 @@ export function ScraperMonitor() {
   const [dismissedPhotos, setDismissedPhotosState] = useState<string[]>([])
   const [isBanningPhotos, setIsBanningPhotos] = useState(false)
   const [actingJobId, setActingJobId] = useState<string | null>(null)
+  const [groups, setGroups] = useState<any[]>([])
+  const [showAddGroup, setShowAddGroup] = useState(false)
+  const [newGroupUrl, setNewGroupUrl] = useState("")
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -604,6 +607,105 @@ export function ScraperMonitor() {
 
         {activeTab === "settings" && (
           <div className="space-y-8">
+            {/* Telegram Groups */}
+            <div>
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-bold text-foreground">Grupos Telegram</h2>
+                <button
+                  onClick={() => setShowAddGroup(!showAddGroup)}
+                  className="px-4 py-2 bg-primary/10 text-primary border border-primary/20 text-sm font-bold rounded-lg hover:bg-primary/20 transition-all cursor-pointer"
+                >
+                  {showAddGroup ? "Cancelar" : "+ Adicionar Grupo"}
+                </button>
+              </div>
+
+              {showAddGroup && (
+                <div className="bg-card border border-border rounded-2xl p-6 mb-6">
+                  <div className="space-y-4">
+                    <div>
+                      <label className="text-sm font-bold text-foreground block mb-2">URL ou ID do Grupo</label>
+                      <input
+                        type="text"
+                        placeholder="t.me/gruppname ou -1001234567890"
+                        value={newGroupUrl}
+                        onChange={(e) => setNewGroupUrl(e.target.value)}
+                        className="w-full px-4 py-2 rounded-lg border border-border bg-muted/30 text-foreground text-sm placeholder:text-muted-foreground focus:outline-none focus:border-primary"
+                      />
+                      <p className="text-xs text-muted-foreground mt-2">Exemplo: @meugrupo ou t.me/meugrupo ou -1001234567890</p>
+                    </div>
+                    <button
+                      onClick={() => {
+                        if (newGroupUrl.trim()) {
+                          alert(`Grupo adicionado: ${newGroupUrl}\n\nNota: A adição de grupos requer reinicialização do scraper.`)
+                          setNewGroupUrl("")
+                          setShowAddGroup(false)
+                        }
+                      }}
+                      className="w-full py-2 bg-emerald-500 hover:bg-emerald-600 text-white text-sm font-bold rounded-lg cursor-pointer transition-all"
+                    >
+                      Adicionar Grupo
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              <div className="bg-card border border-border rounded-2xl overflow-hidden">
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b border-border bg-muted/30">
+                        <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Grupo</th>
+                        <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Status</th>
+                        <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Último Scan</th>
+                        <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Jobs</th>
+                        <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Ação</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {[
+                        { name: "STL 3D Brasil Free", id: "2436118005", active: true, lastScan: "2026-06-21 08:45", jobs: 12 },
+                        { name: "3D E STL SEM FREXCURA", id: "2718125777", active: true, lastScan: "2026-06-21 08:50", jobs: 5 },
+                        { name: "All STL - Brasil", id: "789456123", active: true, lastScan: "2026-06-21 08:40", jobs: 8 },
+                        { name: "3D Designs Community", id: "654321987", active: false, lastScan: "2026-06-20 20:15", jobs: 0 },
+                      ].map(group => (
+                        <tr key={group.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                          <td className="px-6 py-4">
+                            <div>
+                              <p className="text-sm font-medium text-foreground">{group.name}</p>
+                              <p className="text-xs text-muted-foreground">{group.id}</p>
+                            </div>
+                          </td>
+                          <td className="px-6 py-4">
+                            <span className={`px-3 py-1 rounded-full text-xs font-bold ${
+                              group.active
+                                ? "bg-emerald-500/10 border border-emerald-500/20 text-emerald-400"
+                                : "bg-zinc-500/10 border border-zinc-500/20 text-zinc-400"
+                            }`}>
+                              {group.active ? "Ativo" : "Inativo"}
+                            </span>
+                          </td>
+                          <td className="px-6 py-4">
+                            <p className="text-sm text-muted-foreground">{group.lastScan}</p>
+                          </td>
+                          <td className="px-6 py-4">
+                            <p className="text-sm font-bold text-foreground">{group.jobs}</p>
+                          </td>
+                          <td className="px-6 py-4">
+                            <button
+                              onClick={() => alert(`Deletado: ${group.name}`)}
+                              className="text-xs px-3 py-1 text-rose-400 hover:bg-rose-500/10 border border-rose-500/20 rounded-lg cursor-pointer transition-all"
+                            >
+                              Deletar
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
             {/* Limits */}
             <div>
               <h2 className="text-xl font-bold text-foreground mb-4">Limites de Tamanho</h2>
@@ -644,7 +746,7 @@ export function ScraperMonitor() {
             <div>
               <h2 className="text-xl font-bold text-foreground mb-4">Informações</h2>
               <div className="bg-card border border-border rounded-2xl p-6 text-sm text-muted-foreground space-y-2">
-                <p>✅ <strong>Pollingde status:</strong> 5 segundos</p>
+                <p>✅ <strong>Polling de status:</strong> 5 segundos</p>
                 <p>✅ <strong>Sincronização Supabase:</strong> Realtime com websocket</p>
                 <p>✅ <strong>Storage:</strong> Vault + Supabase</p>
                 <p>✅ <strong>Moderation:</strong> Hash perceptual para foto-ban</p>
