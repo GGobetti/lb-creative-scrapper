@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import crypto from "crypto";
 import { TelegramClient } from "telegram";
 import { CustomFile } from "telegram/client/uploads";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
@@ -424,12 +425,34 @@ export class ScraperCore {
 
         try { fs.unlinkSync(mediaData); } catch {}
 
-        // Indexar no Supabase
-        await updateJob("indexing");
+        // Validação 1: Arquivo DEVE ter pelo menos 1 foto
         const hasPhotos = matchedPhotos.length > 0;
-        const thumbnail_url = hasPhotos
-          ? matchedPhotos[0]
-          : "https://images.unsplash.com/photo-1612404730960-5c71577fca11?w=500&q=80";
+        if (!hasPhotos) {
+          await updateJob("failed", "Arquivo rejeitado: nenhuma foto associada");
+          console.log(`[Core] ⚠️  "${fileName}" rejeitado - sem fotos`);
+          continue;
+        }
+
+        // Validação 2: Calcular hash do arquivo para detectar duplicatas
+        await updateJob("indexing");
+        const fileBuffer = fs.readFileSync(mediaData);
+        const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+
+        // Verificar se arquivo com mesmo hash já existe
+        const { data: existing } = await this.supabase
+          .from("telegram_indexed_stls")
+          .select("id, file_name")
+          .eq("file_hash", fileHash)
+          .limit(1)
+          .maybeSingle();
+
+        if (existing) {
+          await updateJob("failed", `Duplicata do arquivo "${existing.file_name}"`);
+          console.log(`[Core] 🔄 "${fileName}" é duplicata de "${existing.file_name}"`);
+          continue;
+        }
+
+        const thumbnail_url = matchedPhotos[0];
 
         const { error: insertErr } = await this.supabase.from("telegram_indexed_stls").insert({
           title,
@@ -439,6 +462,7 @@ export class ScraperCore {
           telegram_message_id: sentId,
           file_name: fileName,
           file_size_bytes: fileSize,
+          file_hash: fileHash,
           tags,
           thumbnail_url,
           photos: matchedPhotos,
