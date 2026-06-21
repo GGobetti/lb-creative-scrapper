@@ -33,6 +33,7 @@ export function ScraperMonitor() {
   const [groups, setGroups] = useState<any[]>([])
   const [showAddGroup, setShowAddGroup] = useState(false)
   const [newGroupUrl, setNewGroupUrl] = useState("")
+  const [selectedJobs, setSelectedJobs] = useState<string[]>([])
 
   const fetchJobs = useCallback(async () => {
     try {
@@ -81,6 +82,35 @@ export function ScraperMonitor() {
   const persistDismissed = (next: string[]) => {
     setDismissedPhotosState(next)
     if (typeof window !== "undefined") localStorage.setItem("dismissedAdminPhotos", JSON.stringify(next))
+  }
+
+  const handleBulkDeleteJobs = async () => {
+    if (selectedJobs.length === 0) return
+    if (!confirm(`Deletar ${selectedJobs.length} arquivo(s)? Isso não pode ser desfeito!`)) return
+
+    let successCount = 0
+    try {
+      for (const jobId of selectedJobs) {
+        try {
+          const response = await fetch("/api/delete-model", {
+            method: "DELETE",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ id: jobId })
+          })
+          if (response.ok) {
+            successCount++
+          }
+        } catch (err) {
+          console.error(`Erro ao deletar job ${jobId}:`, err)
+        }
+      }
+
+      alert(`${successCount} de ${selectedJobs.length} arquivo(s) deletado(s)!`)
+      setSelectedJobs([])
+      await fetchJobs() // Recarregar lista
+    } catch (err: any) {
+      alert(`Erro: ${err.message}`)
+    }
   }
 
   useEffect(() => {
@@ -351,6 +381,19 @@ export function ScraperMonitor() {
         {/* Content */}
         {activeTab === "history" && (
           <>
+            {/* Bulk Delete Button */}
+            {selectedJobs.length > 0 && (
+              <div className="mb-6 p-4 bg-red-500/10 border border-red-500/20 rounded-xl flex items-center justify-between">
+                <p className="text-sm text-red-400 font-bold">{selectedJobs.length} arquivo(s) selecionado(s)</p>
+                <button
+                  onClick={handleBulkDeleteJobs}
+                  className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white text-sm font-bold rounded-lg transition-all cursor-pointer"
+                >
+                  🗑️ Deletar Selecionados
+                </button>
+              </div>
+            )}
+
             {/* Status Filter */}
             <div className="mb-6 flex flex-wrap gap-2">
               <button
@@ -431,6 +474,20 @@ export function ScraperMonitor() {
                 <table className="w-full">
                   <thead>
                     <tr className="border-b border-border bg-muted/30">
+                      <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase w-10">
+                        <input
+                          type="checkbox"
+                          checked={selectedJobs.length === filteredJobs.length && filteredJobs.length > 0}
+                          onChange={(e) => {
+                            if (e.target.checked) {
+                              setSelectedJobs(filteredJobs.map(j => j.id))
+                            } else {
+                              setSelectedJobs([])
+                            }
+                          }}
+                          className="w-4 h-4 cursor-pointer"
+                        />
+                      </th>
                       <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Arquivo</th>
                       <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Canal / Grupo</th>
                       <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Tamanho</th>
@@ -441,13 +498,27 @@ export function ScraperMonitor() {
                   <tbody>
                     {filteredJobs.length === 0 ? (
                       <tr>
-                        <td colSpan={5} className="px-6 py-8 text-center text-sm text-muted-foreground">
+                        <td colSpan={6} className="px-6 py-8 text-center text-sm text-muted-foreground">
                           Nenhum job encontrado
                         </td>
                       </tr>
                     ) : (
                       filteredJobs.map(job => (
-                        <tr key={job.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                        <tr key={job.id} className={`border-b border-border/50 transition-colors ${selectedJobs.includes(job.id) ? "bg-red-500/10" : "hover:bg-muted/30"}`}>
+                          <td className="px-6 py-4 text-center">
+                            <input
+                              type="checkbox"
+                              checked={selectedJobs.includes(job.id)}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setSelectedJobs([...selectedJobs, job.id])
+                                } else {
+                                  setSelectedJobs(selectedJobs.filter(id => id !== job.id))
+                                }
+                              }}
+                              className="w-4 h-4 cursor-pointer"
+                            />
+                          </td>
                           <td className="px-6 py-4">
                             <div className="max-w-xs">
                               <p className="text-sm font-medium text-foreground truncate">{job.file_name}</p>
