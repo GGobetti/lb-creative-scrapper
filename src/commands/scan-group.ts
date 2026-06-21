@@ -140,6 +140,8 @@ export async function scanGroupCommand(args: { groupId: string; hours?: number }
       const docs = buffered.filter(m => m.type === "document");
       if (docs.length === 0) continue;
 
+      console.log(`\n👤 De ${senderId}: ${docs.length} arquivo(s)`);
+
       const newDocs: BufferedMessage[] = [];
       for (const docItem of docs) {
         const doc = (docItem.message.media as any).document;
@@ -148,17 +150,22 @@ export async function scanGroupCommand(args: { groupId: string; hours?: number }
         const fileSize = Number(doc.size);
 
         if (fileSize > sizeLimitBytes) {
-          console.log(`   ⏩ "${fileName}" acima do limite (${(fileSize / 1024 / 1024).toFixed(0)}MB), pulando`);
+          console.log(`   ❌ "${fileName}" acima do limite (${(fileSize / 1024 / 1024).toFixed(0)}MB)`);
           continue;
         }
 
+        console.log(`   ✅ "${fileName}" (${(fileSize / 1024 / 1024).toFixed(1)}MB) - será processado`);
         newDocs.push(docItem);
         totalQueued++;
       }
 
-      if (newDocs.length === 0) continue;
+      if (newDocs.length === 0) {
+        console.log(`   ⚠️  Nenhum arquivo válido neste grupo`);
+        continue;
+      }
 
       const photos = buffered.filter(m => m.type === "photo");
+      console.log(`   📸 ${photos.length} foto(s) associada(s)\n`);
       await core.processGroupMessages(client, [...newDocs, ...photos], chatTitle, chatId, printerType);
     }
 
