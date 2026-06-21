@@ -72,10 +72,16 @@ export async function scanGroupCommand(args: { groupId: string; hours?: number }
 
     let messages: any[] = [];
     try {
-      messages = await client.getMessages(entity, { limit: 500 });
+      // Tenta buscar com limit maior para capturar histórico completo
+      messages = await client.getMessages(entity, { limit: 0 }); // 0 = sem limite
     } catch (e: any) {
-      console.error(`❌ Erro ao buscar msgs: ${e.message}`);
-      return;
+      // Se limit 0 não funcionar, tenta com número grande
+      try {
+        messages = await client.getMessages(entity, { limit: 10000 });
+      } catch (e2: any) {
+        console.error(`❌ Erro ao buscar msgs: ${e2.message}`);
+        return;
+      }
     }
 
     const inWindow = messages.filter((m: any) => {
