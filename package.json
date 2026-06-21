@@ -4,23 +4,41 @@
   "description": "CLI para escanear grupos Telegram e indexar STLs no LB Creative Studio",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "ts-node src/index.ts",
-    "build": "tsc",
-    "start": "node dist/index.js",
+    "dev": "next dev -p 3001",
+    "dev:scan": "ts-node src/index.ts",
+    "build": "next build",
+    "start": "next start -p 3001",
     "scan": "ts-node src/index.ts scan",
     "scan:48h": "ts-node src/index.ts scan --hours 48"
   },
   "dependencies": {
+    "@radix-ui/react-dialog": "^1.1.17",
+    "@radix-ui/react-label": "^2.1.10",
+    "@radix-ui/react-separator": "^1.1.10",
     "@supabase/supabase-js": "^2.39.0",
+    "@tailwindcss/postcss": "^4.3.1",
+    "clsx": "^2.1.1",
     "dotenv": "^16.3.1",
+    "express": "^5.2.1",
+    "framer-motion": "^12.40.0",
     "jimp": "^0.22.10",
+    "lucide-react": "^1.21.0",
+    "next": "^16.2.9",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "tailwind-merge": "^3.6.0",
     "telegram": "^2.19.10",
     "yargs": "^17.7.2"
   },
   "devDependencies": {
+    "@types/express": "^5.0.6",
     "@types/node": "^20.11.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
     "@types/yargs": "^17.0.24",
+    "@vitejs/plugin-react": "^6.0.2",
     "ts-node": "^10.9.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vite": "^8.0.16"
   }
 }

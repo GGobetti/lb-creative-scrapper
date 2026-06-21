@@ -184,6 +184,13 @@ export async function scanCommand(args: { hours?: number }): Promise<void> {
 
     core.saveHashCache();
 
+    // Atualizar heartbeat na web app
+    const supabaseHeartbeat = createClient(config.supabase.url, config.supabase.serviceRoleKey);
+    await supabaseHeartbeat
+      .from("telegram_scraper_settings")
+      .update({ last_heartbeat: new Date().toISOString() })
+      .eq("id", "default");
+
     console.log(`\n✅ Scan concluído!`);
     console.log(`   📥 ${totalQueued} arquivo(s) processado(s)`);
     console.log(`   ⏩ ${totalSkipped} arquivo(s) já indexado(s), ignorados\n`);
