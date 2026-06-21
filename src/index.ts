@@ -2,6 +2,7 @@ import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
 import { scanCommand } from "./commands/scan";
 import { daemonCommand } from "./commands/daemon";
+import { scanGroupCommand } from "./commands/scan-group";
 
 yargs(hideBin(process.argv))
   .scriptName("scraper")
@@ -40,6 +41,26 @@ yargs(hideBin(process.argv))
       await daemonCommand({ hours: argv.hours, interval: argv.interval });
     }
   )
-  .demandCommand(1, "Informe um comando: scan ou daemon")
+  .command(
+    "scan-group",
+    "Escaneia um grupo específico do Telegram",
+    (y) =>
+      y.option("groupId", {
+        alias: "g",
+        type: "string",
+        description: "ID do grupo do Telegram (ex: -1004497395268)",
+        required: true,
+      })
+      .option("hours", {
+        alias: "h",
+        type: "number",
+        default: 24,
+        description: "Janela de tempo em horas para buscar msgs",
+      }),
+    async (argv) => {
+      await scanGroupCommand({ groupId: argv.groupId, hours: argv.hours });
+    }
+  )
+  .demandCommand(1, "Informe um comando: scan, daemon ou scan-group")
   .help()
   .parse();
