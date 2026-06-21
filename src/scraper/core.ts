@@ -350,28 +350,14 @@ export class ScraperCore {
         // Verificar duplicata no índice
         const { data: existing } = await this.supabase
           .from("telegram_indexed_stls")
-          .select("id, photos")
+          .select("id")
           .eq("file_name", fileName)
           .eq("file_size_bytes", fileSize)
           .limit(1)
           .maybeSingle();
 
         if (existing) {
-          console.log(`[Core] ${fileName} já indexado. Verificando fotos novas...`);
-          if (matchedPhotos.length > 0) {
-            const existingPhotos = existing.photos || [];
-            const entityId = `stl:${existing.id}`;
-            const urlDeduped = matchedPhotos.filter(p => !existingPhotos.includes(p));
-            if (urlDeduped.length > 0) {
-              const existingHashSet = await this.buildEntityPhotoHashSet(entityId, existingPhotos);
-              const newPhotos = await this.deduplicatePhotos(urlDeduped, photoHashByUrl, existingHashSet, entityId, bannedHashes);
-              if (newPhotos.length > 0) {
-                await this.supabase.from("telegram_indexed_stls")
-                  .update({ photos: [...existingPhotos, ...newPhotos], has_appended_photos: true })
-                  .eq("id", existing.id);
-              }
-            }
-          }
+          console.log(`[Core] ⏩ ${fileName} já indexado - ignorando (arquivo + fotos)`);
           continue;
         }
 
