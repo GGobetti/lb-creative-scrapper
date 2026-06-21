@@ -425,16 +425,16 @@ export class ScraperCore {
         const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
 
         // Verificar se arquivo com mesmo hash já existe
-        const { data: existing } = await this.supabase
+        const { data: existingByHash } = await this.supabase
           .from("telegram_indexed_stls")
           .select("id, file_name")
           .eq("file_hash", fileHash)
           .limit(1)
           .maybeSingle();
 
-        if (existing) {
-          await updateJob("failed", `Duplicata do arquivo "${existing.file_name}"`);
-          console.log(`[Core] 🔄 "${fileName}" é duplicata de "${existing.file_name}"`);
+        if (existingByHash) {
+          await updateJob("failed", `Duplicata do arquivo "${existingByHash.file_name}"`);
+          console.log(`[Core] 🔄 "${fileName}" é duplicata de "${existingByHash.file_name}"`);
           continue;
         }
 
