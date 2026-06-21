@@ -11,6 +11,7 @@
     "start": "next start -p 3001",
     "scan": "tsx src/index.ts scan",
     "scan:48h": "tsx src/index.ts scan --hours 48",
+    "scan-group": "tsx src/index.ts scan-group",
     "daemon": "tsx src/index.ts daemon --interval 30",
     "daemon:1h": "tsx src/index.ts daemon --interval 60"
   },
