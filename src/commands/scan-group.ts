@@ -88,6 +88,8 @@ export async function scanGroupCommand(args: { groupId: string; hours?: number }
     // Debug: mostrar o que tem nas mensagens
     let photoCount = 0, docCount = 0, textCount = 0, otherCount = 0;
     for (const msg of inWindow) {
+      const mediaType = msg.media?.className || "none";
+
       if (msg.media && ("document" in msg.media || msg.media?.className === "MessageMediaDocument")) {
         const doc = (msg.media as any).document;
         const attr = doc.attributes?.find((a: any) => "fileName" in a);
@@ -98,8 +100,14 @@ export async function scanGroupCommand(args: { groupId: string; hours?: number }
         photoCount++;
       } else if (msg.message) {
         textCount++;
+        console.log(`  💬 "${msg.message.substring(0, 50)}"`);
       } else {
         otherCount++;
+        console.log(`  🔹 OUTRO (${mediaType})`);
+        console.log(`     Keys: ${Object.keys(msg).slice(0, 5).join(", ")}`);
+        if (msg.media) {
+          console.log(`     Media Keys: ${Object.keys(msg.media).slice(0, 5).join(", ")}`);
+        }
       }
     }
     console.log(`\n  Breakdown: 📄${docCount} 📸${photoCount} 💬${textCount} 🔹${otherCount}\n`);
