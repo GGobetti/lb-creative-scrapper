@@ -85,6 +85,25 @@ export async function scanGroupCommand(args: { groupId: string; hours?: number }
 
     console.log(`📨 ${inWindow.length} msgs na janela de ${hoursBack}h\n`);
 
+    // Debug: mostrar o que tem nas mensagens
+    let photoCount = 0, docCount = 0, textCount = 0, otherCount = 0;
+    for (const msg of inWindow) {
+      if (msg.media && ("document" in msg.media || msg.media?.className === "MessageMediaDocument")) {
+        const doc = (msg.media as any).document;
+        const attr = doc.attributes?.find((a: any) => "fileName" in a);
+        const fileName = attr?.fileName || "desconhecido";
+        docCount++;
+        console.log(`  📄 ${fileName}`);
+      } else if (msg.photo || (msg.media && ("photo" in msg.media || msg.media?.className === "MessageMediaPhoto"))) {
+        photoCount++;
+      } else if (msg.message) {
+        textCount++;
+      } else {
+        otherCount++;
+      }
+    }
+    console.log(`\n  Breakdown: 📄${docCount} 📸${photoCount} 💬${textCount} 🔹${otherCount}\n`);
+
     const senderGroups = new Map<string, BufferedMessage[]>();
 
     for (const msg of [...inWindow].reverse()) {
