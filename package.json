@@ -10,7 +10,9 @@
     "build": "next build",
     "start": "next start -p 3001",
     "scan": "tsx src/index.ts scan",
-    "scan:48h": "tsx src/index.ts scan --hours 48"
+    "scan:48h": "tsx src/index.ts scan --hours 48",
+    "daemon": "tsx src/index.ts daemon --interval 30",
+    "daemon:1h": "tsx src/index.ts daemon --interval 60"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.17",
