@@ -358,12 +358,13 @@ export class ScraperCore {
           continue;
         }
 
-        // Verificar duplicata no índice
+        // Verificar duplicata no índice (apenas arquivos NÃO deletados)
         const { data: existing } = await this.supabase
           .from("telegram_indexed_stls")
           .select("id")
           .eq("file_name", fileName)
           .eq("file_size_bytes", fileSize)
+          .eq("is_deleted", false)
           .limit(1)
           .maybeSingle();
 
@@ -425,11 +426,12 @@ export class ScraperCore {
         const fileBuffer = fs.readFileSync(mediaData);
         const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
 
-        // Verificar se arquivo com mesmo hash já existe
+        // Verificar se arquivo com mesmo hash já existe (apenas NÃO deletados)
         const { data: existingByHash } = await this.supabase
           .from("telegram_indexed_stls")
           .select("id, file_name")
           .eq("file_hash", fileHash)
+          .eq("is_deleted", false)
           .limit(1)
           .maybeSingle();
 
@@ -458,6 +460,7 @@ export class ScraperCore {
           thumbnail_url,
           photos: matchedPhotos,
           printer_type: printerType,
+          is_deleted: false,
         });
 
         if (insertErr) {
