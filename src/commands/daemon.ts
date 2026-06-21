@@ -140,6 +140,21 @@ async function runScan(client: TelegramClient, hoursBack: number = 24): Promise<
             continue;
           }
 
+          // Verificar se foi deletado pelo usuário
+          const { data: deleted } = await supabase
+            .from("user_deleted_files")
+            .select("id")
+            .eq("file_name", fileName)
+            .eq("file_size_bytes", fileSize)
+            .limit(1)
+            .maybeSingle();
+
+          if (deleted) {
+            console.log(`   ⏩ "${fileName}" foi deletado pelo usuário, ignorando`);
+            totalSkipped++;
+            continue;
+          }
+
           const { data: ex } = await supabase
             .from("telegram_indexed_stls")
             .select("id")

@@ -18,13 +18,34 @@ export async function DELETE(request: NextRequest) {
       );
     }
 
-    // Deletar job (remover completamente de telegram_scraper_jobs)
-    const { error } = await supabase
+    // Buscar job antes de deletar para pegar arquivo
+    const { data: job } = await supabase
+      .from("telegram_scraper_jobs")
+      .select("file_name, file_size_bytes")
+      .eq("id", id)
+      .single();
+
+    // Deletar job
+    const { error: deleteErr } = await supabase
       .from("telegram_scraper_jobs")
       .delete()
       .eq("id", id);
 
-    if (error) throw error;
+    if (deleteErr) throw deleteErr;
+
+    // Adicionar à blacklist para não processar novamente
+    if (job) {
+      await supabase
+        .from("user_deleted_files")
+        .insert({
+          file_name: job.file_name,
+          file_size_bytes: job.file_size_bytes,
+          deleted_at: new Date().toISOString()
+        })
+        .catch(() => {
+          // Tabela pode não existir ainda, ignora
+        });
+    }
 
     return NextResponse.json({
       success: true,
