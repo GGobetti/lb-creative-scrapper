@@ -61,6 +61,9 @@ export async function scanCommand(args: { hours?: number }): Promise<void> {
       config.telegram.vaultChannelId
     );
 
+    // Processa jobs grandes aprovados na moderação antes de varrer novos
+    await core.processApprovedJobs(client);
+
     const cutoff = Math.floor((Date.now() - hoursBack * 60 * 60 * 1000) / 1000);
     let totalQueued = 0;
     let totalSkipped = 0;
@@ -144,11 +147,8 @@ export async function scanCommand(args: { hours?: number }): Promise<void> {
           const fileName = attr?.fileName || "arquivo.stl";
           const fileSize = Number(doc.size);
 
-          if (fileSize > sizeLimitBytes) {
-            console.log(`   ⏩ "${fileName}" acima do limite (${(fileSize / 1024 / 1024).toFixed(0)}MB), pulando`);
-            totalSkipped++;
-            continue;
-          }
+          // Arquivos acima do limite NÃO são mais pulados: seguem o fluxo e o core
+          // os coloca em 'pending_approval' (moderação) — ver core.ts / sizeLimitBytes.
 
           // Verificar se foi deletado pelo usuário
           const { data: deleted } = await supabase
@@ -193,7 +193,7 @@ export async function scanCommand(args: { hours?: number }): Promise<void> {
         if (newDocs.length === 0) continue;
 
         const photos = buffered.filter(m => m.type === "photo");
-        await core.processGroupMessages(client, [...newDocs, ...photos], chatTitle, chatId, printerType);
+        await core.processGroupMessages(client, [...newDocs, ...photos], chatTitle, chatId, printerType, sizeLimitBytes);
       }
     }
 
