@@ -33,6 +33,38 @@ async function fetchWithTimeout(url: string, ms = 30_000) {
   }
 }
 
+async function pLimit<T>(
+  tasks: (() => Promise<T>)[],
+  limit: number
+): Promise<T[]> {
+  const results: T[] = [];
+  const executing: Promise<void>[] = [];
+
+  for (const task of tasks) {
+    const promise = task().then(
+      result => {
+        results.push(result);
+      },
+      () => {
+        // erro silencioso - será tratado pelo caller
+      }
+    );
+
+    executing.push(promise);
+
+    if (executing.length >= limit) {
+      await Promise.race(executing);
+      executing.splice(
+        executing.findIndex(p => p === promise),
+        1
+      );
+    }
+  }
+
+  await Promise.all(executing);
+  return results;
+}
+
 export class ScraperCore {
   private supabase: SupabaseClient;
   private globalPhotoHashCache = new Map<string, string>();
@@ -221,7 +253,22 @@ export class ScraperCore {
 
     if (docs.length === 0) return;
 
-    console.log(`\n[Core] Processando ${docs.length} doc(s), ${photos.length} foto(s) de "${chatTitle}"`);
+    // Buscar limite de concorrência das configurações
+    let maxConcurrent = 5;
+    try {
+      const { data: settings } = await this.supabase
+        .from("telegram_scraper_settings")
+        .select("max_concurrent_downloads")
+        .eq("id", "default")
+        .single();
+      if (settings?.max_concurrent_downloads) {
+        maxConcurrent = settings.max_concurrent_downloads;
+      }
+    } catch (e) {
+      console.warn(`[Core] Não conseguiu buscar max_concurrent_downloads, usando padrão 5`);
+    }
+
+    console.log(`\n[Core] Processando ${docs.length} doc(s), ${photos.length} foto(s) de "${chatTitle}" (até ${maxConcurrent} em paralelo)`);
 
     // Carregar hashes banidos
     let bannedHashes: string[] = [];
@@ -440,40 +487,74 @@ export class ScraperCore {
         const fileBuffer = fs.readFileSync(mediaData);
         const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
 
-        // Verificar se arquivo com mesmo hash já existe (apenas NÃO deletados)
-        let existingByHash = null;
+        // Verificar se arquivo com mesmo hash já existe (ativo ou deletado)
+        let existingActive = null;
+        let existingDeleted = null;
         try {
-          const result = await this.supabase
+          // Buscar versão ativa
+          const activeResult = await this.supabase
             .from("telegram_indexed_stls")
             .select("id, file_name")
             .eq("file_hash", fileHash)
             .eq("is_deleted", false)
             .limit(1)
             .maybeSingle();
-          existingByHash = result.data;
+          existingActive = activeResult.data;
+
+          // Buscar versão deletada
+          const deletedResult = await this.supabase
+            .from("telegram_indexed_stls")
+            .select("id, file_name")
+            .eq("file_hash", fileHash)
+            .eq("is_deleted", true)
+            .limit(1)
+            .maybeSingle();
+          existingDeleted = deletedResult.data;
         } catch (e) {
-          // Coluna is_deleted pode não existir ainda - tenta sem ela
+          // Coluna is_deleted pode não existir ainda - tenta sem filtro
           const result = await this.supabase
             .from("telegram_indexed_stls")
             .select("id, file_name")
             .eq("file_hash", fileHash)
             .limit(1)
             .maybeSingle();
-          existingByHash = result.data;
+          existingActive = result.data;
         }
 
-        if (existingByHash) {
-          try { fs.unlinkSync(mediaData); } catch {}
-          await updateJob("failed", `Duplicata do arquivo "${existingByHash.file_name}"`);
-          console.log(`[Core] 🔄 "${fileName}" é duplicata de "${existingByHash.file_name}"`);
-          continue;
-        }
-
-        // Agora pode deletar
+        // Agora pode deletar do disco
         try { fs.unlinkSync(mediaData); } catch {}
 
         const thumbnail_url = matchedPhotos[0];
 
+        // Se encontrou versão ativa, é duplicata
+        if (existingActive) {
+          await updateJob("failed", `Duplicata do arquivo "${existingActive.file_name}"`);
+          console.log(`[Core] 🔄 "${fileName}" é duplicata de "${existingActive.file_name}"`);
+          continue;
+        }
+
+        // Se encontrou versão deletada, restaurar
+        if (existingDeleted) {
+          const { error: restoreErr } = await this.supabase
+            .from("telegram_indexed_stls")
+            .update({
+              is_deleted: false,
+              file_name: fileName,
+              telegram_message_id: sentId,
+              photos: matchedPhotos,
+            })
+            .eq("id", existingDeleted.id);
+
+          if (restoreErr) {
+            await updateJob("failed", restoreErr.message);
+          } else {
+            await updateJob("completed");
+            console.log(`[Core] ✅ "${fileName}" restaurado de soft delete!`);
+          }
+          continue;
+        }
+
+        // Inserir novo arquivo
         const { error: insertErr } = await this.supabase.from("telegram_indexed_stls").insert({
           title,
           description: `Modelo 3D "${fileName}" indexado automaticamente do Telegram.`,

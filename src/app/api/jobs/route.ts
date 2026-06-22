@@ -74,6 +74,34 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    if (action === "cancel") {
+      const { error } = await supabase
+        .from("telegram_scraper_jobs")
+        .update({ status: "cancelled", updated_at: new Date().toISOString() })
+        .eq("id", jobId);
+
+      if (error) throw error;
+
+      return NextResponse.json({
+        success: true,
+        message: "Job cancelled"
+      });
+    }
+
+    if (action === "retry") {
+      const { error } = await supabase
+        .from("telegram_scraper_jobs")
+        .update({ status: "pending", error_message: null, updated_at: new Date().toISOString() })
+        .eq("id", jobId);
+
+      if (error) throw error;
+
+      return NextResponse.json({
+        success: true,
+        message: "Job retry initiated"
+      });
+    }
+
     return NextResponse.json(
       { error: "Invalid action" },
       { status: 400 }

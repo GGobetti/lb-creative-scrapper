@@ -1,0 +1,39 @@
+{
+  "permissions": {
+    "allow": [
+      "Read",
+      "Bash(git *)",
+      "Bash(npm *)",
+      "Bash(npx *)",
+      "Bash(ls *)",
+      "Bash(cat *)",
+      "Bash(find *)",
+      "Bash(grep *)",
+      "Bash(pwd)",
+      "Bash(cd *)",
+      "Bash(echo *)",
+      "Bash(date *)",
+      "Bash(head *)",
+      "Bash(tail *)",
+      "Bash(wc *)",
+      "Bash(file *)",
+      "Bash(stat *)",
+      "Bash(which *)",
+      "Bash(type *)",
+      "Bash",
+      "Read",
+      "Edit",
+      "Write",
+      "Bash(rm -rf .git)",
+      "Bash(git init *)",
+      "Bash(git config *)",
+      "Bash(git remote *)",
+      "Bash(npx tsc *)",
+      "Bash(npm run *)",
+      "Skill(run)",
+      "Skill(run:*)",
+      "Skill(code-review)",
+      "Skill(code-review:*)"
+    ]
+  }
+}

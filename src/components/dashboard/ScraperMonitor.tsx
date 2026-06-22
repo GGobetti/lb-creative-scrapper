@@ -21,8 +21,9 @@ type TabType = "approvals" | "history" | "settings"
 
 export function ScraperMonitor() {
   const [scraperJobs, setScraperJobs] = useState<ScraperJob[]>([])
-  const [scraperSettings, setScraperSettings] = useState<{ size_limit_mb: number; last_heartbeat?: string } | null>(null)
+  const [scraperSettings, setScraperSettings] = useState<{ size_limit_mb: number; last_heartbeat?: string; max_concurrent_downloads?: number } | null>(null)
   const [scraperHeartbeat, setScraperHeartbeat] = useState<string | null>(null)
+  const [maxConcurrentDownloads, setMaxConcurrentDownloads] = useState<number>(5)
   const [statusFilter, setStatusFilter] = useState<string | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [activeTab, setActiveTab] = useState<TabType>("history")
@@ -64,6 +65,7 @@ export function ScraperMonitor() {
       const data = await response.json()
       setScraperSettings(data)
       setScraperHeartbeat(data?.last_heartbeat || null)
+      setMaxConcurrentDownloads(data?.max_concurrent_downloads || 5)
     } catch (err) {
       console.error("Erro ao carregar configurações:", err)
     }
@@ -230,6 +232,41 @@ export function ScraperMonitor() {
       await fetchJobs()
     } catch (err: any) {
       alert(`Erro ao rejeitar: ${err.message}`)
+    } finally {
+      setActingJobId(null)
+    }
+  }
+
+  const handleCancelJob = async (jobId: string) => {
+    if (!confirm("Cancelar este download?")) return
+    setActingJobId(jobId)
+    try {
+      const res = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "cancel", jobId })
+      })
+      if (!res.ok) throw new Error("Erro ao cancelar")
+      await fetchJobs()
+    } catch (err: any) {
+      alert(`Erro ao cancelar: ${err.message}`)
+    } finally {
+      setActingJobId(null)
+    }
+  }
+
+  const handleRetryJob = async (jobId: string) => {
+    setActingJobId(jobId)
+    try {
+      const res = await fetch("/api/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "retry", jobId })
+      })
+      if (!res.ok) throw new Error("Erro ao reiniciar")
+      await fetchJobs()
+    } catch (err: any) {
+      alert(`Erro ao reiniciar: ${err.message}`)
     } finally {
       setActingJobId(null)
     }
@@ -493,12 +530,13 @@ export function ScraperMonitor() {
                       <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Tamanho</th>
                       <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Status</th>
                       <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Atualizado Em</th>
+                      <th className="text-left px-6 py-4 text-xs font-bold text-muted-foreground uppercase">Ações</th>
                     </tr>
                   </thead>
                   <tbody>
                     {filteredJobs.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="px-6 py-8 text-center text-sm text-muted-foreground">
+                        <td colSpan={7} className="px-6 py-8 text-center text-sm text-muted-foreground">
                           Nenhum job encontrado
                         </td>
                       </tr>
@@ -552,6 +590,30 @@ export function ScraperMonitor() {
                                 minute: "2-digit"
                               })}
                             </p>
+                          </td>
+                          <td className="px-6 py-4">
+                            <div className="flex gap-2">
+                              {(job.status === "downloading_file" || job.status === "pending" || job.status === "uploading_vault" || job.status === "indexing") && (
+                                <button
+                                  onClick={() => handleCancelJob(job.id)}
+                                  disabled={actingJobId === job.id}
+                                  title="Cancelar download"
+                                  className="px-2 py-1 text-xs bg-red-500/10 hover:bg-red-500/20 text-red-400 border border-red-500/20 rounded transition-all disabled:opacity-50 cursor-pointer"
+                                >
+                                  {actingJobId === job.id ? <Loader2 size={12} className="animate-spin inline" /> : "✕ Cancelar"}
+                                </button>
+                              )}
+                              {job.status === "failed" && (
+                                <button
+                                  onClick={() => handleRetryJob(job.id)}
+                                  disabled={actingJobId === job.id}
+                                  title="Reiniciar download"
+                                  className="px-2 py-1 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/20 rounded transition-all disabled:opacity-50 cursor-pointer"
+                                >
+                                  {actingJobId === job.id ? <Loader2 size={12} className="animate-spin inline" /> : "↻ Retry"}
+                                </button>
+                              )}
+                            </div>
                           </td>
                         </tr>
                       ))
@@ -841,9 +903,9 @@ export function ScraperMonitor() {
 
             {/* Limits */}
             <div>
-              <h2 className="text-xl font-bold text-foreground mb-4">Limites de Tamanho</h2>
+              <h2 className="text-xl font-bold text-foreground mb-4">Limites e Performance</h2>
               <div className="bg-card border border-border rounded-2xl p-6">
-                <div className="space-y-4">
+                <div className="space-y-6">
                   <div>
                     <label className="text-sm font-bold text-foreground block mb-2">Limite de arquivo (MB)</label>
                     <input
@@ -853,6 +915,43 @@ export function ScraperMonitor() {
                       className="w-full px-4 py-2 rounded-lg border border-border bg-muted/30 text-foreground text-sm disabled:opacity-50"
                     />
                     <p className="text-xs text-muted-foreground mt-2">Arquivos acima deste limite aguardam aprovação</p>
+                  </div>
+
+                  <div className="border-t border-border pt-6">
+                    <label className="text-sm font-bold text-foreground block mb-2">Downloads em paralelo</label>
+                    <div className="flex items-center gap-4">
+                      <input
+                        type="number"
+                        min="1"
+                        max="20"
+                        value={maxConcurrentDownloads}
+                        onChange={(e) => setMaxConcurrentDownloads(Math.max(1, parseInt(e.target.value) || 5))}
+                        className="w-20 px-4 py-2 rounded-lg border border-border bg-card text-foreground text-sm"
+                      />
+                      <button
+                        onClick={async () => {
+                          try {
+                            const response = await fetch("/api/settings", {
+                              method: "PUT",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ max_concurrent_downloads: maxConcurrentDownloads })
+                            })
+                            if (response.ok) {
+                              alert(`Limite atualizado para ${maxConcurrentDownloads} downloads em paralelo`)
+                              await fetchSettings()
+                            } else {
+                              alert("Erro ao atualizar configuração")
+                            }
+                          } catch (err) {
+                            alert("Erro ao salvar configuração")
+                          }
+                        }}
+                        className="px-4 py-2 bg-primary text-primary-foreground text-sm font-bold rounded-lg hover:bg-primary/80 transition-all cursor-pointer"
+                      >
+                        Salvar
+                      </button>
+                    </div>
+                    <p className="text-xs text-muted-foreground mt-2">Quantidade de arquivos a baixar simultaneamente (padrão: 5)</p>
                   </div>
                 </div>
               </div>
