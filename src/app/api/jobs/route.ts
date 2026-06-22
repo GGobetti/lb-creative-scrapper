@@ -12,11 +12,20 @@ const supabase = createClient(supabaseUrl || "", supabaseServiceKey || "");
 
 export async function GET() {
   try {
-    const { data, error } = await supabase
+    let query = supabase
       .from("telegram_scraper_jobs")
       .select("*")
       .order("created_at", { ascending: false })
       .limit(300);
+
+    // Tentar filtrar por is_deleted - se falhar, ignora (coluna pode não existir ainda)
+    try {
+      query = query.eq("is_deleted", false);
+    } catch (e) {
+      // Coluna não existe ainda, continua sem filtrar
+    }
+
+    const { data, error } = await query;
 
     if (error) throw error;
 

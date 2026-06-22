@@ -27,10 +27,10 @@ export async function DELETE(request: NextRequest) {
 
     if (fetchErr) throw fetchErr;
 
-    // Deletar job
+    // Soft delete: marcar como deletado em vez de remover
     const { error: deleteErr } = await supabase
       .from("telegram_scraper_jobs")
-      .delete()
+      .update({ is_deleted: true })
       .eq("id", id);
 
     if (deleteErr) throw deleteErr;
