@@ -328,7 +328,7 @@ export class ScraperCore {
     const docPhotosMap = new Map<number, string[]>();
     const MAX_PHOTOS_PER_DOC = 5;
     const PHOTO_WINDOW_BEFORE_SECONDS = 30; // Fotos até 30s ANTES do arquivo
-    const PHOTO_WINDOW_AFTER_SECONDS = 5;   // Fotos até 5s APÓS do arquivo
+    // REMOVIDO: PHOTO_WINDOW_AFTER_SECONDS — não associar fotos posteriores (são do próximo arquivo)
 
     for (const photoItem of photos) {
       const photoMsg = photoItem.message;
@@ -360,7 +360,7 @@ export class ScraperCore {
 
         if ((sameUser || likelyForward) &&
             timeDiff >= -PHOTO_WINDOW_BEFORE_SECONDS &&
-            timeDiff <= PHOTO_WINDOW_AFTER_SECONDS) {
+            timeDiff <= 0) { // Só fotos ANTES do arquivo (timeDiff <= 0)
           // Encontrar o arquivo mais próximo
           if (Math.abs(timeDiff) < Math.abs(bestTimeDiff)) {
             bestTimeDiff = timeDiff;
