@@ -16,6 +16,7 @@
     "daemon:1h": "tsx src/index.ts daemon --interval 60"
   },
   "dependencies": {
+    "@aws-sdk/client-s3": "^3.1073.0",
     "@radix-ui/react-dialog": "^1.1.17",
     "@radix-ui/react-label": "^2.1.10",
     "@radix-ui/react-separator": "^1.1.10",
