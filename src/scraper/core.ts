@@ -6,6 +6,7 @@ import { CustomFile } from "telegram/client/uploads";
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { getPerceptualHash, hammingDistance } from "./imageHash";
 import { VaultUploader } from "../telegram/vault";
+import { isR2Configured, uploadToR2 } from "../lib/r2";
 import { BufferedMessage, GroupConfig } from "./types";
 
 const QUEUE_TASK_TIMEOUT_MS = 10 * 60 * 1000;
@@ -465,27 +466,41 @@ export class ScraperCore {
           continue;
         }
 
-        // Upload para Vault
-        await updateJob("uploading_vault");
+        // Hash do arquivo (dedup + chave do R2) — antes de qualquer upload
+        const fileBuffer = fs.readFileSync(mediaData);
+        const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+
         const tags = this.buildTags(fileName);
         const title = this.formatTitle(fileName);
         const hashtagStr = tags.map(t => `#${t}`).join(" ");
 
-        const sentId = await withTimeout(
-          this.vaultUploader.upload({
-            fileName,
-            fileSize,
-            filePath: mediaData,
-            caption: `LB Vault: ${title}\nOrigem: ${chatTitle}${hashtagStr ? `\n\n${hashtagStr}` : ""}`,
-          }),
-          25 * 60_000,
-          "Timeout ao enviar para Vault (25min)"
-        );
+        // Armazém: Cloudflare R2 (alvo) ou Telegram Vault (legado/fallback se R2 não configurado)
+        await updateJob("uploading_vault");
+        let r2ObjectKey: string | null = null;
+        let telegramMessageId: number = docMsg.id;
+        if (isR2Configured()) {
+          const ext = (fileName.split(".").pop() || "bin").toLowerCase();
+          r2ObjectKey = `stl/${fileHash}.${ext}`;
+          await withTimeout(
+            uploadToR2(r2ObjectKey, mediaData, fileName),
+            25 * 60_000,
+            "Timeout ao enviar para R2 (25min)"
+          );
+          console.log(`[Core] ☁️  "${fileName}" enviado ao R2: ${r2ObjectKey}`);
+        } else {
+          telegramMessageId = await withTimeout(
+            this.vaultUploader.upload({
+              fileName,
+              fileSize,
+              filePath: mediaData,
+              caption: `LB Vault: ${title}\nOrigem: ${chatTitle}${hashtagStr ? `\n\n${hashtagStr}` : ""}`,
+            }),
+            25 * 60_000,
+            "Timeout ao enviar para Vault (25min)"
+          );
+        }
 
-        // Calcular hash do arquivo ANTES de deletar
         await updateJob("indexing");
-        const fileBuffer = fs.readFileSync(mediaData);
-        const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
 
         // Verificar se arquivo com mesmo hash já existe (ativo ou deletado)
         let existingActive = null;
@@ -540,7 +555,8 @@ export class ScraperCore {
             .update({
               is_deleted: false,
               file_name: fileName,
-              telegram_message_id: sentId,
+              telegram_message_id: telegramMessageId,
+              r2_object_key: r2ObjectKey,
               photos: matchedPhotos,
             })
             .eq("id", existingDeleted.id);
@@ -560,7 +576,8 @@ export class ScraperCore {
           description: `Modelo 3D "${fileName}" indexado automaticamente do Telegram.`,
           telegram_group_id: chatId,
           telegram_group_name: chatTitle,
-          telegram_message_id: sentId,
+          telegram_message_id: telegramMessageId,
+          r2_object_key: r2ObjectKey,
           file_name: fileName,
           file_size_bytes: fileSize,
           file_hash: fileHash,
