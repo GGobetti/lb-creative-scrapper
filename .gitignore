@@ -52,3 +52,6 @@ Thumbs.db
 # Scraper specific
 /telegram-session/
 /downloads/
+# Temp de download/processamento (binários grandes — nunca versionar)
+.temp/
+/logs/
