@@ -383,6 +383,7 @@ export class ScraperCore {
       const matchedPhotos = docPhotosMap.get(docMsg.id) || [];
       let jobId: string | null = null;
       let tempFilePath: string | null = null;
+      let fileName = "arquivo.stl"; // declarado fora do try p/ estar acessível no catch
 
       const updateJob = async (status: string, err?: string) => {
         if (!jobId) return;
@@ -394,7 +395,6 @@ export class ScraperCore {
 
       try {
         const doc = docMsg.media.document as any;
-        let fileName = "arquivo.stl";
         const attr = doc.attributes?.find((a: any) => "fileName" in a);
         if (attr) fileName = attr.fileName;
         const fileSize = Number(doc.size);
