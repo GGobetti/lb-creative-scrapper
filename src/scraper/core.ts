@@ -246,7 +246,8 @@ export class ScraperCore {
     messages: BufferedMessage[],
     chatTitle: string,
     chatId: string,
-    printerType: string
+    printerType: string,
+    sizeLimitBytes: number = Infinity
   ): Promise<void> {
     const sorted = [...messages].sort((a, b) => a.message.id - b.message.id);
     const docs = sorted.filter(m => m.type === "document");
@@ -435,6 +436,25 @@ export class ScraperCore {
           continue;
         }
 
+        // Arquivo acima do limite → fila de moderação (não baixa ainda)
+        // O admin aprova no painel; o scraper processa via processApprovedJobs().
+        if (fileSize > sizeLimitBytes) {
+          await this.supabase
+            .from("telegram_scraper_jobs")
+            .insert({
+              file_name: fileName,
+              chat_title: chatTitle,
+              status: "pending_approval",
+              file_size_bytes: fileSize,
+              telegram_message_id: docMsg.id,
+              telegram_group_id: chatId,
+              photos: matchedPhotos,
+              printer_type: printerType,
+            });
+          console.log(`[Core] 🛡️  "${fileName}" (${(fileSize / 1024 / 1024).toFixed(0)}MB) acima do limite → pending_approval`);
+          continue;
+        }
+
         // Criar job no banco
         const { data: jobData } = await this.supabase
           .from("telegram_scraper_jobs")
@@ -607,6 +627,128 @@ export class ScraperCore {
           if (tempFilePath && fs.existsSync(tempFilePath)) {
             try { fs.unlinkSync(tempFilePath); } catch {}
           }
+        }
+      }
+    }
+  }
+
+  /**
+   * Processa jobs aprovados na moderação (status 'approved'): baixa o arquivo grande,
+   * envia ao armazém (R2 se configurado, senão Vault) e indexa. Marca completed/failed.
+   * Chamado pelo scan/daemon antes de cada varredura.
+   */
+  async processApprovedJobs(client: TelegramClient): Promise<void> {
+    const { data: jobs } = await this.supabase
+      .from("telegram_scraper_jobs")
+      .select("id, file_name, file_size_bytes, telegram_message_id, telegram_group_id, photos, printer_type, chat_title")
+      .eq("status", "approved")
+      .limit(20);
+
+    if (!jobs || jobs.length === 0) return;
+    console.log(`\n[Core] 🛡️  ${jobs.length} job(s) aprovado(s) para processar`);
+
+    for (const job of jobs) {
+      const fileName: string = job.file_name || "arquivo.stl";
+      const matchedPhotos: string[] = job.photos || [];
+      let tempFilePath: string | null = null;
+
+      const updateJob = async (status: string, err?: string) => {
+        await this.supabase
+          .from("telegram_scraper_jobs")
+          .update({ status, error_message: err || null, updated_at: new Date().toISOString() })
+          .eq("id", job.id);
+      };
+
+      try {
+        await updateJob("downloading_file");
+
+        // Resolver a mensagem de origem (grupo + id da mensagem guardados no job)
+        let entity: any;
+        try { entity = await client.getEntity(job.telegram_group_id); }
+        catch { entity = job.telegram_group_id; }
+        const msgs = await client.getMessages(entity, { ids: [job.telegram_message_id] });
+        const docMsg: any = msgs?.[0];
+        if (!docMsg || !docMsg.media?.document) {
+          await updateJob("failed", "Mensagem de origem não encontrada");
+          continue;
+        }
+
+        if (!fs.existsSync(this.tempDir)) fs.mkdirSync(this.tempDir, { recursive: true });
+        const safeFileName = fileName.replace(/[^\w\.\-]/g, "_");
+        tempFilePath = path.join(this.tempDir, `${Date.now()}_${safeFileName}`);
+
+        const mediaData = await this.downloadMediaWithTimeout(client, docMsg, tempFilePath, 60_000, job.id);
+        if (!mediaData || !fs.existsSync(mediaData)) {
+          await updateJob("failed", "Erro ao salvar no disco");
+          continue;
+        }
+
+        const fileBuffer = fs.readFileSync(mediaData);
+        const fileHash = crypto.createHash("sha256").update(fileBuffer).digest("hex");
+        const tags = this.buildTags(fileName);
+        const title = this.formatTitle(fileName);
+        const hashtagStr = tags.map(t => `#${t}`).join(" ");
+
+        await updateJob("uploading_vault");
+        let r2ObjectKey: string | null = null;
+        let telegramMessageId: number = job.telegram_message_id;
+        if (isR2Configured()) {
+          const ext = (fileName.split(".").pop() || "bin").toLowerCase();
+          r2ObjectKey = `stl/${fileHash}.${ext}`;
+          await withTimeout(uploadToR2(r2ObjectKey, mediaData, fileName), 25 * 60_000, "Timeout ao enviar para R2 (25min)");
+        } else {
+          telegramMessageId = await withTimeout(
+            this.vaultUploader.upload({
+              fileName,
+              fileSize: job.file_size_bytes,
+              filePath: mediaData,
+              caption: `LB Vault: ${title}\nOrigem: ${job.chat_title}${hashtagStr ? `\n\n${hashtagStr}` : ""}`,
+            }),
+            25 * 60_000,
+            "Timeout ao enviar para Vault (25min)"
+          );
+        }
+
+        await updateJob("indexing");
+        try { fs.unlinkSync(mediaData); } catch {}
+
+        // Dedup por hash (alguém pode ter indexado igual nesse meio tempo)
+        const { data: dup } = await this.supabase
+          .from("telegram_indexed_stls")
+          .select("id")
+          .eq("file_hash", fileHash)
+          .eq("is_deleted", false)
+          .limit(1)
+          .maybeSingle();
+        if (dup) { await updateJob("failed", "Duplicata (hash já indexado)"); continue; }
+
+        const { error: insertErr } = await this.supabase.from("telegram_indexed_stls").insert({
+          title,
+          description: `Modelo 3D "${fileName}" indexado (aprovado na moderação).`,
+          telegram_group_id: job.telegram_group_id,
+          telegram_group_name: job.chat_title,
+          telegram_message_id: telegramMessageId,
+          r2_object_key: r2ObjectKey,
+          file_name: fileName,
+          file_size_bytes: job.file_size_bytes,
+          file_hash: fileHash,
+          tags,
+          thumbnail_url: matchedPhotos[0],
+          photos: matchedPhotos,
+          printer_type: job.printer_type,
+          is_deleted: false,
+        });
+
+        if (insertErr) {
+          await updateJob("failed", insertErr.message);
+        } else {
+          await updateJob("completed");
+          console.log(`[Core] ✅ "${fileName}" (aprovado) indexado com sucesso!`);
+        }
+      } catch (e: any) {
+        await updateJob("failed", e.message);
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+          try { fs.unlinkSync(tempFilePath); } catch {}
         }
       }
     }
