@@ -324,58 +324,28 @@ export class ScraperCore {
       }
     }
 
-    // Mapear fotos ao doc: mesmo remetente + 30s antes até 5s depois + máx 5 fotos
+    // Mapear fotos ao doc: lógica de buffer sequencial
+    // Percorre mensagens em ordem (já estão sorted por id).
+    // Fotos acumulam no buffer; quando encontra um arquivo, consome o buffer inteiro
+    // e o reseta. Assim cada arquivo recebe somente as fotos postadas antes dele,
+    // sem contaminar os arquivos seguintes.
     const docPhotosMap = new Map<number, string[]>();
     const MAX_PHOTOS_PER_DOC = 5;
-    const PHOTO_WINDOW_BEFORE_SECONDS = 30; // Fotos até 30s ANTES do arquivo
-    // REMOVIDO: PHOTO_WINDOW_AFTER_SECONDS — não associar fotos posteriores (são do próximo arquivo)
 
-    for (const photoItem of photos) {
-      const photoMsg = photoItem.message;
-      const photoSenderId = String(photoMsg.senderId || "unknown");
-      const photoTime = typeof photoMsg.date === "number"
-        ? photoMsg.date
-        : Math.floor(new Date(photoMsg.date).getTime() / 1000);
-      const url = photoUrlsMap.get(photoMsg.id);
-      if (!url) continue;
+    let photoBuffer: string[] = []; // URLs de fotos acumuladas aguardando próximo arquivo
 
-      // Procurar doc do MESMO remetente OU forwards próximos, dentro da janela de tempo
-      let bestMatch: any = null;
-      let bestTimeDiff = Infinity;
-
-      for (const docItem of docs) {
-        const docMsg = docItem.message;
-        const docSenderId = String(docMsg.senderId || "unknown");
-        const docTime = typeof docMsg.date === "number"
-          ? docMsg.date
-          : Math.floor(new Date(docMsg.date).getTime() / 1000);
-
-        const timeDiff = docTime - photoTime; // Arquivo menos foto (pode ser negativo)
-
-        // Critério 1: Mesma pessoa + janela de tempo (critério original - OK)
-        const sameUser = docSenderId === photoSenderId;
-
-        // Critério 2: Remetentes diferentes MAS muito próximos (< 2s) = provavelmente forwards enviados juntos
-        const likelyForward = Math.abs(timeDiff) < 2;
-
-        if ((sameUser || likelyForward) &&
-            timeDiff >= -PHOTO_WINDOW_BEFORE_SECONDS &&
-            timeDiff <= 0) { // Só fotos ANTES do arquivo (timeDiff <= 0)
-          // Encontrar o arquivo mais próximo
-          if (Math.abs(timeDiff) < Math.abs(bestTimeDiff)) {
-            bestTimeDiff = timeDiff;
-            bestMatch = docMsg;
-          }
+    for (const item of sorted) {
+      if (item.type === "photo") {
+        const url = photoUrlsMap.get(item.message.id);
+        if (url && photoBuffer.length < MAX_PHOTOS_PER_DOC) {
+          photoBuffer.push(url);
         }
-      }
-
-      if (bestMatch) {
-        const list = docPhotosMap.get(bestMatch.id) || [];
-        // Limitar a máximo 5 fotos por documento
-        if (list.length < MAX_PHOTOS_PER_DOC) {
-          list.push(url);
-          docPhotosMap.set(bestMatch.id, list);
+      } else if (item.type === "document") {
+        // Consome o buffer atual para este arquivo
+        if (photoBuffer.length > 0) {
+          docPhotosMap.set(item.message.id, [...photoBuffer]);
         }
+        photoBuffer = []; // Reseta para o próximo arquivo
       }
     }
 
