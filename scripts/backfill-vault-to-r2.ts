@@ -29,6 +29,9 @@ async function main() {
     apiId: config.telegram.apiId,
     apiHash: config.telegram.apiHash,
     session: config.telegram.session,
+    connectionRetries: 10,        // Mais tentativas de reconexão
+    requestRetries: 5,             // Mais tentativas de requisição
+    floodSleepThreshold: 100,      // Mais tolerante com rate limits
   });
 
   let vault: any;
