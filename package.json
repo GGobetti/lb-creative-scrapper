@@ -14,7 +14,8 @@
     "scan-group": "tsx src/index.ts scan-group",
     "daemon": "tsx src/index.ts daemon --interval 30",
     "daemon:1h": "tsx src/index.ts daemon --interval 60",
-    "backfill:r2": "tsx scripts/backfill-vault-to-r2.ts"
+    "backfill:r2": "tsx scripts/backfill-vault-to-r2.ts",
+    "regen:telegram": "tsx scripts/regenerate-telegram-session.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1073.0",
