@@ -298,6 +298,9 @@ export function ScraperMonitor() {
       persistDismissed([...dismissedPhotos, ...selectedBans])
       setSelectedBans([])
 
+      // Refetch jobs para atualizar UI imediatamente (remove fotos banidas da tela)
+      await fetchJobs()
+
       if (successCount === selectedBans.length) {
         alert(`${successCount} foto(s) banida(s) com sucesso!`)
       } else {
