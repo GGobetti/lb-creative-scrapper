@@ -36,28 +36,45 @@ interface DedupManifest {
   hashGroups: HashGroup[];
 }
 
-async function getImageHash(imageUrl: string): Promise<string | null> {
-  try {
-    const res = await fetch(imageUrl, { timeout: 10000 });
-    if (!res.ok) return null;
-
-    const buffer = Buffer.from(await res.arrayBuffer());
-    const tempPath = path.join(os.tmpdir(), `dedup_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`);
-    fs.writeFileSync(tempPath, buffer);
-
-    let hash: string | null = null;
+async function getImageHash(imageUrl: string, retries = 3): Promise<{ hash: string | null; error: string | null; fileSize: number | null }> {
+  for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      hash = await getPerceptualHash(tempPath);
-    } finally {
-      try {
-        fs.unlinkSync(tempPath);
-      } catch {}
-    }
+      const res = await fetch(imageUrl, { timeout: 30000 }); // 30s timeout
+      if (!res.ok) {
+        if (attempt === retries) {
+          return { hash: null, error: `HTTP ${res.status}`, fileSize: null };
+        }
+        await new Promise((r) => setTimeout(r, 1000 * attempt)); // backoff
+        continue;
+      }
 
-    return hash;
-  } catch (err) {
-    return null;
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const fileSize = buffer.length;
+      const tempPath = path.join(
+        os.tmpdir(),
+        `dedup_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`
+      );
+      fs.writeFileSync(tempPath, buffer);
+
+      let hash: string | null = null;
+      try {
+        hash = await getPerceptualHash(tempPath);
+      } finally {
+        try {
+          fs.unlinkSync(tempPath);
+        } catch {}
+      }
+
+      return { hash, error: null, fileSize };
+    } catch (err: any) {
+      if (attempt === retries) {
+        return { hash: null, error: err?.message || "Unknown error", fileSize: null };
+      }
+      await new Promise((r) => setTimeout(r, 1000 * attempt));
+    }
   }
+
+  return { hash: null, error: "Max retries exceeded", fileSize: null };
 }
 
 async function main() {
@@ -94,16 +111,23 @@ async function main() {
   });
 
   console.log(`📸 Encontradas ${allUrls.size} URLs únicas de fotos.\n`);
-  console.log("🔄 Calculando perceptual hashes (isso pode levar alguns minutos)...\n");
+  console.log("🔄 Calculando perceptual hashes (retry automático 3x, timeout 30s)...\n");
 
-  // 3. Calcular hash de cada URL
+  // 3. Calcular hash de cada URL com retry
   const urlToHash = new Map<string, string>();
+  const urlToFileSize = new Map<string, number>();
+  const failedUrls: Array<{ url: string; error: string }> = [];
   let processedCount = 0;
 
   for (const url of allUrls) {
-    const hash = await getImageHash(url);
-    if (hash) {
-      urlToHash.set(url, hash);
+    const result = await getImageHash(url, 3); // 3 tentativas
+    if (result.hash) {
+      urlToHash.set(url, result.hash);
+      if (result.fileSize) {
+        urlToFileSize.set(url, result.fileSize);
+      }
+    } else if (result.error) {
+      failedUrls.push({ url, error: result.error });
     }
     processedCount++;
     if (processedCount % 20 === 0) {
@@ -111,7 +135,8 @@ async function main() {
     }
   }
 
-  console.log(`\n✅ ${urlToHash.size}/${allUrls.size} fotos foram hashadas com sucesso.\n`);
+  console.log(`\n✅ ${urlToHash.size}/${allUrls.size} fotos foram hashadas com sucesso.`);
+  console.log(`⚠️  ${failedUrls.length} URLs falharam ao fazer hash.\n`);
 
   // 4. Agrupar URLs pelo hash
   const hashToUrls = new Map<string, string[]>();
@@ -193,7 +218,28 @@ async function main() {
     console.log("");
   });
 
-  // 8. Gerar manifesto
+  // 8. Gerar análise detalhada e manifesto
+  const analysisPath = path.join(process.cwd(), `dedup-analysis-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
+  const analysis = {
+    timestamp: new Date().toISOString(),
+    summary: {
+      total_stls: allStls.length,
+      total_unique_urls: allUrls.size,
+      urls_hashed_success: urlToHash.size,
+      urls_hashed_failed: failedUrls.length,
+      hash_success_rate: `${Math.round((urlToHash.size / allUrls.size) * 100)}%`,
+      duplicate_groups_found: hashGroups.length,
+      total_urls_redundant: hashGroups.reduce((sum, g) => sum + g.redundantUrls.length, 0),
+      total_stls_affected: totalStlsAffected,
+    },
+    failed_urls: failedUrls.slice(0, 50), // Primeiros 50 falhas
+    hash_groups_preview: hashGroups.slice(0, 5), // Preview dos primeiros 5 grupos
+    all_hash_groups: hashGroups,
+  };
+
+  fs.writeFileSync(analysisPath, JSON.stringify(analysis, null, 2));
+  console.log(`✅ Análise detalhada gerada: ${path.basename(analysisPath)}\n`);
+
   const manifest: DedupManifest = {
     timestamp: new Date().toISOString(),
     stage: "detected",
@@ -204,15 +250,32 @@ async function main() {
   console.log(`✅ Manifesto gerado: dedup-manifest.json\n`);
 
   console.log("📊 Resumo:");
+  console.log(`   - Total de STLs: ${allStls.length}`);
+  console.log(`   - URLs únicas: ${allUrls.size}`);
+  console.log(`   - URLs hasheadas: ${urlToHash.size}/${allUrls.size} (${Math.round((urlToHash.size / allUrls.size) * 100)}%)`);
   console.log(`   - Grupos de fotos iguais: ${hashGroups.length}`);
   console.log(`   - Total de URLs redundantes: ${hashGroups.reduce((sum, g) => sum + g.redundantUrls.length, 0)}`);
-  console.log(`   - Total de STLs a atualizar: ${totalStlsAffected}`);
+  console.log(`   - Total de STLs a atualizar: ${totalStlsAffected}\n`);
+
+  if (failedUrls.length > 0) {
+    console.log(`⚠️  ${failedUrls.length} URLs falharam ao fazer hash:`);
+    failedUrls.slice(0, 5).forEach((item) => {
+      console.log(`   - ${item.url.slice(0, 70)}... (${item.error})`);
+    });
+    if (failedUrls.length > 5) {
+      console.log(`   ... e mais ${failedUrls.length - 5} (ver em ${path.basename(analysisPath)})\n`);
+    }
+  }
 
   // 9. Próximos passos
   if (process.argv.includes("--confirm")) {
     await confirmStage(supabase, allStls, manifestPath, manifest);
   } else {
-    console.log("\n⏭️  Próximo passo: npm run dedup:photos -- --confirm\n");
+    console.log("📋 Revise os arquivos gerados ANTES de confirmar:");
+    console.log(`   1. cat ${path.basename(analysisPath)}`);
+    console.log(`   2. Verifique os grupos de fotos duplicadas`);
+    console.log(`   3. Se estiver tudo certo, rode:\n`);
+    console.log("   npm run dedup:photos -- --confirm\n");
   }
 
   process.exit(0);
