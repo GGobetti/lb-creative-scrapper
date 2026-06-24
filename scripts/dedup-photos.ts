@@ -86,8 +86,44 @@ async function main() {
   const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey);
   const manifestPath = path.join(process.cwd(), "dedup-manifest.json");
 
+  const isConfirm = process.argv.includes("--confirm");
+  const isCleanup = process.argv.includes("--cleanup");
+
   console.log("🔍 Script: Dedup de Fotos por Conteúdo (Perceptual Hash)\n");
   console.log("   Tabelas: telegram_indexed_stls + telegram_scraper_jobs\n");
+
+  // --confirm e --cleanup carregam o manifesto existente — não re-hasheiam nada
+  if (isConfirm || isCleanup) {
+    if (!fs.existsSync(manifestPath)) {
+      console.error("❌ dedup-manifest.json não encontrado. Rode primeiro sem flags para detectar duplicatas.");
+      process.exit(1);
+    }
+    const manifest: DedupManifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+    console.log(`📋 Manifesto carregado (stage: ${manifest.stage}, ${manifest.hashGroups.length} grupos)\n`);
+
+    if (isConfirm) {
+      if (manifest.stage !== "detected") {
+        console.error(`❌ Manifesto já está em stage "${manifest.stage}". Só pode confirmar a partir de "detected".`);
+        process.exit(1);
+      }
+      // Buscar dados atuais para backup
+      const { data: stls } = await supabase.from("telegram_indexed_stls").select("id, file_name, photos").eq("is_deleted", false);
+      const { data: jobs } = await supabase.from("telegram_scraper_jobs").select("id, file_name, photos").neq("file_name", "__photo_bucket__").not("photos", "is", null);
+      await confirmStage(supabase, stls || [], (jobs || []).filter((j: any) => (j.photos || []).length > 0), manifestPath, manifest);
+    }
+
+    if (isCleanup) {
+      if (manifest.stage !== "confirmed") {
+        console.error(`❌ Manifesto está em stage "${manifest.stage}". Execute --confirm antes do --cleanup.`);
+        process.exit(1);
+      }
+      await cleanupStage(supabase, manifestPath, manifest);
+    }
+
+    process.exit(0);
+  }
+
+  // --- DETECÇÃO (sem flags) ---
 
   // 1. Buscar todos os STLs indexados
   const { data: allStls, error: stlError } = await supabase
@@ -277,12 +313,8 @@ async function main() {
     if (failedUrls.length > 5) console.log(`   ... e mais ${failedUrls.length - 5}\n`);
   }
 
-  if (process.argv.includes("--confirm")) {
-    await confirmStage(supabase, safeStls, safeJobs, manifestPath, manifest);
-  } else {
-    console.log("📋 Se estiver tudo certo, rode:");
-    console.log("   npm run dedup:photos -- --confirm\n");
-  }
+  console.log("📋 Se estiver tudo certo, rode:");
+  console.log("   npm run dedup:photos -- --confirm\n");
 
   process.exit(0);
 }
@@ -381,6 +413,49 @@ async function confirmStage(
   console.log(`   - Backup: ${path.basename(backupPath)}\n`);
   console.log("📝 Próximo passo (opcional — deleta URLs redundantes do storage):");
   console.log("   npm run dedup:photos -- --cleanup\n");
+}
+
+async function cleanupStage(supabase: any, manifestPath: string, manifest: DedupManifest) {
+  console.log("\n🗑️  STAGE: Deletando URLs redundantes do storage...\n");
+
+  // Coletar todas as URLs canônicas para garantir que nunca sejam deletadas
+  const canonicalUrls = new Set(manifest.hashGroups.map(g => g.canonicalUrl));
+  const allRedundant = manifest.hashGroups.flatMap(g => g.redundantUrls);
+
+  // Dupla verificação de segurança
+  const toDelete = allRedundant.filter(url => !canonicalUrls.has(url));
+  const skipped = allRedundant.length - toDelete.length;
+  if (skipped > 0) console.log(`⚠️  ${skipped} URLs puladas (eram canônicas em outro grupo)\n`);
+
+  let deletedCount = 0;
+  let errorCount = 0;
+
+  for (const url of toDelete) {
+    // Extrair path do bucket da URL do Supabase Storage
+    const match = url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+    if (!match) {
+      console.log(`  ⚠️  URL não reconhecida (pulando): ${url.slice(0, 60)}...`);
+      errorCount++;
+      continue;
+    }
+    const [, bucket, filePath] = match;
+
+    const { error } = await supabase.storage.from(bucket).remove([filePath]);
+    if (error) {
+      console.error(`  ❌ ${filePath}: ${error.message}`);
+      errorCount++;
+    } else {
+      console.log(`  🗑️  ${filePath}`);
+      deletedCount++;
+    }
+  }
+
+  manifest.stage = "cleaned";
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+  console.log(`\n🏁 Cleanup concluído!`);
+  console.log(`   - Deletadas: ${deletedCount}`);
+  console.log(`   - Erros: ${errorCount}`);
 }
 
 main().catch((e) => {
