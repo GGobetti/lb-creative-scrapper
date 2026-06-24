@@ -17,6 +17,7 @@
     "backfill:r2": "tsx scripts/backfill-vault-to-r2.ts",
     "dedup:photos": "tsx scripts/dedup-photos.ts",
     "dedup:restore": "tsx scripts/dedup-restore.ts",
+    "cleanup:banned": "tsx scripts/cleanup-banned-photos.ts",
     "regen:telegram": "tsx scripts/regenerate-telegram-session.ts"
   },
   "dependencies": {
