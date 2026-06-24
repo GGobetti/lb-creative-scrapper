@@ -1,30 +1,63 @@
 /**
- * Script: Dedup de Fotos (Consolidação Horizontal com Manifesto)
+ * Script: Dedup de Fotos por Conteúdo (Perceptual Hash)
  *
  * 3 estágios:
- * 1. npm run dedup:photos          → detecta duplicatas, gera manifesto, NADA é deletado
- * 2. npm run dedup:photos -- --confirm  → aplica consolidações no banco (STLs apontam para URL canônica)
- * 3. npm run dedup:photos -- --cleanup  → deleta URLs redundantes do storage (com validações de safety)
+ * 1. npm run dedup:photos
+ *    → Baixa cada imagem, calcula perceptual hash
+ *    → Agrupa URLs com mesmo hash (mesma imagem)
+ *    → Gera manifesto (dedup-manifest.json)
  *
- * O manifesto (dedup-manifest.json) garante que URLs canônicas nunca são deletadas.
+ * 2. npm run dedup:photos -- --confirm
+ *    → Aplica consolidações no banco
+ *    → STLs que apontavam para URL redundante agora apontam para URL canônica
+ *
+ * 3. npm run dedup:photos -- --cleanup
+ *    → Deleta URLs redundantes do storage (com validações de safety)
+ *    → URLs canônicas NUNCA são deletadas
  */
 import { createClient } from "@supabase/supabase-js";
 import { loadConfig } from "../src/config";
+import { getPerceptualHash } from "../src/scraper/imageHash";
 import fs from "fs";
 import path from "path";
+import os from "os";
 
-interface Consolidation {
+interface HashGroup {
+  hash: string;
   canonicalUrl: string;
   redundantUrls: string[];
-  stlsAffected: Array<{ id: string; file_name: string }>;
+  stlsWithCanonical: Array<{ id: string; file_name: string }>;
+  stlsWithRedundant: Array<{ id: string; file_name: string; oldUrl: string }>;
 }
 
 interface DedupManifest {
   timestamp: string;
   stage: "detected" | "confirmed" | "cleaned";
-  canonicalUrls: string[];
-  redundantUrls: string[];
-  consolidations: Consolidation[];
+  hashGroups: HashGroup[];
+}
+
+async function getImageHash(imageUrl: string): Promise<string | null> {
+  try {
+    const res = await fetch(imageUrl, { timeout: 10000 });
+    if (!res.ok) return null;
+
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const tempPath = path.join(os.tmpdir(), `dedup_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`);
+    fs.writeFileSync(tempPath, buffer);
+
+    let hash: string | null = null;
+    try {
+      hash = await getPerceptualHash(tempPath);
+    } finally {
+      try {
+        fs.unlinkSync(tempPath);
+      } catch {}
+    }
+
+    return hash;
+  } catch (err) {
+    return null;
+  }
 }
 
 async function main() {
@@ -32,7 +65,7 @@ async function main() {
   const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey);
   const manifestPath = path.join(process.cwd(), "dedup-manifest.json");
 
-  console.log("🔍 Script: Dedup de Fotos com Manifesto\n");
+  console.log("🔍 Script: Dedup de Fotos por Conteúdo (Perceptual Hash)\n");
 
   // 1. Buscar todos os STLs com suas fotos
   const { data: allStls, error: stlError } = await supabase
@@ -52,68 +85,130 @@ async function main() {
 
   console.log(`📦 Encontrados ${allStls.length} STLs.\n`);
 
-  // 2. Construir mapa: URL → lista de STLs
-  const urlToStls = new Map<string, typeof allStls>();
+  // 2. Coletar todas as URLs únicas de fotos
+  const allUrls = new Set<string>();
   allStls.forEach((stl) => {
-    (stl.photos || []).forEach((photoUrl: string) => {
-      if (!urlToStls.has(photoUrl)) {
-        urlToStls.set(photoUrl, []);
-      }
-      urlToStls.get(photoUrl)!.push(stl);
+    (stl.photos || []).forEach((url: string) => {
+      allUrls.add(url);
     });
   });
 
-  // 3. Detectar grupos de fotos duplicadas (URL compartilhada)
-  const consolidations: Consolidation[] = [];
-  const canonicalUrls = new Set<string>();
-  const redundantUrls = new Set<string>();
+  console.log(`📸 Encontradas ${allUrls.size} URLs únicas de fotos.\n`);
+  console.log("🔄 Calculando perceptual hashes (isso pode levar alguns minutos)...\n");
 
-  Array.from(urlToStls.entries()).forEach(([url, stls]) => {
-    if (stls.length > 1) {
-      consolidations.push({
-        canonicalUrl: url, // Mantém essa URL
-        redundantUrls: [], // Por enquanto, vazio (mesma URL compartilhada, sem redundantes)
-        stlsAffected: stls.map((stl) => ({ id: stl.id, file_name: stl.file_name })),
+  // 3. Calcular hash de cada URL
+  const urlToHash = new Map<string, string>();
+  let processedCount = 0;
+
+  for (const url of allUrls) {
+    const hash = await getImageHash(url);
+    if (hash) {
+      urlToHash.set(url, hash);
+    }
+    processedCount++;
+    if (processedCount % 20 === 0) {
+      console.log(`   Processadas: ${processedCount}/${allUrls.size}`);
+    }
+  }
+
+  console.log(`\n✅ ${urlToHash.size}/${allUrls.size} fotos foram hashadas com sucesso.\n`);
+
+  // 4. Agrupar URLs pelo hash
+  const hashToUrls = new Map<string, string[]>();
+  urlToHash.forEach((hash, url) => {
+    if (!hashToUrls.has(hash)) {
+      hashToUrls.set(hash, []);
+    }
+    hashToUrls.get(hash)!.push(url);
+  });
+
+  // 5. Construir mapa URL → STLs que a possuem
+  const urlToStls = new Map<string, typeof allStls>();
+  allStls.forEach((stl) => {
+    (stl.photos || []).forEach((url: string) => {
+      if (!urlToStls.has(url)) {
+        urlToStls.set(url, []);
+      }
+      urlToStls.get(url)!.push(stl);
+    });
+  });
+
+  // 6. Detectar grupos com duplicatas (múltiplas URLs = mesma imagem)
+  const hashGroups: HashGroup[] = [];
+
+  Array.from(hashToUrls.entries()).forEach(([hash, urls]) => {
+    if (urls.length > 1) {
+      // Múltiplas URLs com mesmo hash = fotos iguais
+      const canonicalUrl = urls[0]; // Primeira URL é canônica
+      const redundantUrls = urls.slice(1);
+
+      const stlsWithCanonical = urlToStls.get(canonicalUrl) || [];
+      const stlsWithRedundant: HashGroup["stlsWithRedundant"] = [];
+
+      redundantUrls.forEach((redUrl) => {
+        const stls = urlToStls.get(redUrl) || [];
+        stls.forEach((stl) => {
+          stlsWithRedundant.push({
+            id: stl.id,
+            file_name: stl.file_name,
+            oldUrl: redUrl,
+          });
+        });
       });
-      canonicalUrls.add(url);
+
+      hashGroups.push({
+        hash,
+        canonicalUrl,
+        redundantUrls,
+        stlsWithCanonical: stlsWithCanonical.map((s) => ({ id: s.id, file_name: s.file_name })),
+        stlsWithRedundant,
+      });
     }
   });
 
-  if (consolidations.length === 0) {
-    console.log("✅ Nenhuma foto duplicada encontrada!");
+  if (hashGroups.length === 0) {
+    console.log("✅ Nenhuma foto duplicada (por conteúdo) encontrada!");
     process.exit(0);
   }
 
-  // 4. Mostrar relatório
-  console.log(`⚠️  Encontradas ${consolidations.length} foto(s) compartilhadas:\n`);
+  // 7. Mostrar relatório
+  console.log(`⚠️  Encontrados ${hashGroups.length} grupo(s) de fotos iguais:\n`);
 
-  consolidations.forEach((cons, i) => {
-    console.log(`${i + 1}. Foto em ${cons.stlsAffected.length} STL(s):`);
-    console.log(`   URL canônica: ${cons.canonicalUrl.slice(0, 70)}...`);
-    cons.stlsAffected.forEach((stl) => {
-      console.log(`   - ${stl.file_name}`);
+  let totalStlsAffected = 0;
+  hashGroups.forEach((group, i) => {
+    const totalStls = group.stlsWithCanonical.length + group.stlsWithRedundant.length;
+    totalStlsAffected += totalStls;
+
+    console.log(`${i + 1}. Hash: ${group.hash}`);
+    console.log(`   URLs duplicadas: ${group.redundantUrls.length + 1}`);
+    console.log(`   URL canônica (mantida): ${group.canonicalUrl.slice(0, 70)}...`);
+    console.log(`   URLs redundantes (a deletar):`);
+    group.redundantUrls.forEach((url) => {
+      console.log(`     - ${url.slice(0, 70)}...`);
+    });
+    console.log(`   STLs afetados: ${totalStls}`);
+    group.stlsWithRedundant.forEach((stl) => {
+      console.log(`     - ${stl.file_name} (${stl.oldUrl.slice(0, 50)}... → canônica)`);
     });
     console.log("");
   });
 
-  // 5. Gerar manifesto
+  // 8. Gerar manifesto
   const manifest: DedupManifest = {
     timestamp: new Date().toISOString(),
     stage: "detected",
-    canonicalUrls: Array.from(canonicalUrls),
-    redundantUrls: Array.from(redundantUrls),
-    consolidations,
+    hashGroups,
   };
 
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
   console.log(`✅ Manifesto gerado: dedup-manifest.json\n`);
 
   console.log("📊 Resumo:");
-  console.log(`   - Fotos compartilhadas: ${consolidations.length}`);
-  console.log(`   - URLs canônicas (mantidas): ${canonicalUrls.size}`);
-  console.log(`   - URLs redundantes (a deletar): ${redundantUrls.size}`);
+  console.log(`   - Grupos de fotos iguais: ${hashGroups.length}`);
+  console.log(`   - Total de URLs redundantes: ${hashGroups.reduce((sum, g) => sum + g.redundantUrls.length, 0)}`);
+  console.log(`   - Total de STLs a atualizar: ${totalStlsAffected}`);
 
-  // 6. Próximos passos
+  // 9. Próximos passos
   if (process.argv.includes("--confirm")) {
     await confirmStage(supabase, allStls, manifestPath, manifest);
   } else {
@@ -133,15 +228,16 @@ async function confirmStage(
 
   let confirmedCount = 0;
 
-  for (const cons of manifest.consolidations) {
-    for (const aff of cons.stlsAffected) {
+  for (const group of manifest.hashGroups) {
+    for (const aff of group.stlsWithRedundant) {
       const stlData = allStls.find((s) => s.id === aff.id);
-      if (!stlData || (stlData.photos || []).includes(cons.canonicalUrl)) {
-        continue;
-      }
+      if (!stlData) continue;
 
+      // Remover URL redundante, adicionar URL canônica
       const updatedPhotos = (stlData.photos || [])
-        .concat([cons.canonicalUrl]);
+        .filter((url: string) => url !== aff.oldUrl) // Remove redundante
+        .concat([group.canonicalUrl]) // Adiciona canônica
+        .filter((url: string, idx: number, arr: string[]) => arr.indexOf(url) === idx); // Dedup
 
       const { error: updateError } = await supabase
         .from("telegram_indexed_stls")
