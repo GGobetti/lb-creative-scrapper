@@ -319,11 +319,9 @@ export function ScraperMonitor() {
     const photos: { jobId: string; url: string; jobTitle: string; count?: number }[] = []
     const urlToCount = new Map<string, number>()
 
-    // Apenas jobs que ainda precisam de moderação
-    // failed = já falhou, não será indexado; completed/rejected/cancelled = encerrados
-    const activeJobs = scraperJobs.filter(j =>
-      !["completed", "rejected", "cancelled", "failed"].includes(j.status)
-    )
+    // Incluir fotos de todos os jobs, inclusive os já completados
+    // para permitir banir fotos de propaganda em STLs já indexados
+    const activeJobs = scraperJobs
 
     // Primeiro pass: contar ocorrências por URL
     activeJobs.forEach(job => {
