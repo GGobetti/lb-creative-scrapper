@@ -16,6 +16,7 @@
     "daemon:1h": "tsx src/index.ts daemon --interval 60",
     "backfill:r2": "tsx scripts/backfill-vault-to-r2.ts",
     "dedup:photos": "tsx scripts/dedup-photos.ts",
+    "dedup:restore": "tsx scripts/dedup-restore.ts",
     "regen:telegram": "tsx scripts/regenerate-telegram-session.ts"
   },
   "dependencies": {

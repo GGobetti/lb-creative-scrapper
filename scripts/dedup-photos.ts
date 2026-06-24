@@ -226,12 +226,34 @@ async function confirmStage(
 ) {
   console.log("\n🔄 STAGE: Aplicando consolidações...\n");
 
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const backupPath = path.join(process.cwd(), `dedup-backup-${timestamp}.json`);
+  const logPath = path.join(process.cwd(), `dedup-log-${timestamp}.json`);
+
+  // 1. Backup ANTES de aplicar mudanças
+  console.log("💾 Criando backup do estado atual...");
+  const backup = {
+    timestamp: new Date().toISOString(),
+    totalStls: allStls.length,
+    stls: allStls.map((stl) => ({
+      id: stl.id,
+      file_name: stl.file_name,
+      photos: stl.photos || [],
+    })),
+  };
+  fs.writeFileSync(backupPath, JSON.stringify(backup, null, 2));
+  console.log(`✅ Backup salvo em: ${backupPath}\n`);
+
+  // 2. Aplicar consolidações com log detalhado
+  const changes: any[] = [];
   let confirmedCount = 0;
 
   for (const group of manifest.hashGroups) {
     for (const aff of group.stlsWithRedundant) {
       const stlData = allStls.find((s) => s.id === aff.id);
       if (!stlData) continue;
+
+      const oldPhotos = [...(stlData.photos || [])];
 
       // Remover URL redundante, adicionar URL canônica
       const updatedPhotos = (stlData.photos || [])
@@ -249,15 +271,43 @@ async function confirmStage(
       } else {
         console.log(`✅ ${aff.file_name}`);
         confirmedCount++;
+
+        // Registrar mudança no log
+        changes.push({
+          stl_id: aff.id,
+          stl_name: aff.file_name,
+          hash_group: group.hash,
+          old_url: aff.oldUrl,
+          canonical_url: group.canonicalUrl,
+          old_photos: oldPhotos,
+          new_photos: updatedPhotos,
+          timestamp: new Date().toISOString(),
+        });
       }
     }
   }
+
+  // 3. Salvar log detalhado
+  const log = {
+    timestamp: new Date().toISOString(),
+    stage: "confirmed",
+    total_changes: confirmedCount,
+    changes,
+    manifest_path: manifestPath,
+    backup_path: backupPath,
+  };
+  fs.writeFileSync(logPath, JSON.stringify(log, null, 2));
+  console.log(`\n📝 Log detalhado salvo em: ${logPath}\n`);
 
   // Atualizar manifesto
   manifest.stage = "confirmed";
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
-  console.log(`\n🏁 Consolidação concluída! ${confirmedCount} STL(s) atualizado(s).\n`);
+  console.log(`🏁 Consolidação concluída! ${confirmedCount} STL(s) atualizado(s).\n`);
+  console.log("📦 Arquivos gerados:");
+  console.log(`   - Backup: ${path.basename(backupPath)}`);
+  console.log(`   - Log: ${path.basename(logPath)}`);
+  console.log(`   - Manifesto: dedup-manifest.json\n`);
   console.log("📝 Próximo passo:");
   console.log("   npm run dedup:photos -- --cleanup\n");
   console.log("   (Isso vai deletar URLs redundantes do storage com SEGURANÇA)\n");
