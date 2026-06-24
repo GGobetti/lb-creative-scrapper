@@ -319,9 +319,10 @@ export function ScraperMonitor() {
     const photos: { jobId: string; url: string; jobTitle: string; count?: number }[] = []
     const urlToCount = new Map<string, number>()
 
-    // Apenas jobs que ainda precisam de moderação (excluir finalizados)
+    // Apenas jobs que ainda precisam de moderação
+    // failed = já falhou, não será indexado; completed/rejected/cancelled = encerrados
     const activeJobs = scraperJobs.filter(j =>
-      !["completed", "rejected", "cancelled"].includes(j.status)
+      !["completed", "rejected", "cancelled", "failed"].includes(j.status)
     )
 
     // Primeiro pass: contar ocorrências por URL
