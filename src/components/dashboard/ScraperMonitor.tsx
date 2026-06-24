@@ -295,7 +295,8 @@ export function ScraperMonitor() {
         }
       }
 
-      persistDismissed([...dismissedPhotos, ...selectedBans])
+      const bannedUrls = selectedBans.map(key => key.slice(key.indexOf("|") + 1))
+      persistDismissed([...dismissedPhotos, ...bannedUrls])
       setSelectedBans([])
 
       // Refetch jobs para atualizar UI imediatamente (remove fotos banidas da tela)
@@ -714,7 +715,7 @@ export function ScraperMonitor() {
                     {selectedBans.length > 0 && (
                       <div className="flex gap-2">
                         <button
-                          onClick={() => { persistDismissed([...dismissedPhotos, ...selectedBans]); setSelectedBans([]) }}
+                          onClick={() => { const urls = selectedBans.map(k => k.slice(k.indexOf("|") + 1)); persistDismissed([...dismissedPhotos, ...urls]); setSelectedBans([]) }}
                           className="px-4 py-2 bg-zinc-600 hover:bg-zinc-500 text-white text-xs font-bold rounded-xl cursor-pointer transition-all flex items-center gap-2"
                         >
                           <Eye size={14} /> Ignorar ({selectedBans.length})
