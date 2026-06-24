@@ -319,24 +319,29 @@ export function ScraperMonitor() {
     const photos: { jobId: string; url: string; jobTitle: string; count?: number }[] = []
     const urlToCount = new Map<string, number>()
 
+    // Apenas jobs que ainda precisam de moderação (excluir finalizados)
+    const activeJobs = scraperJobs.filter(j =>
+      !["completed", "rejected", "cancelled"].includes(j.status)
+    )
+
     // Primeiro pass: contar ocorrências por URL
-    scraperJobs.forEach(job => {
+    activeJobs.forEach(job => {
       (job.photos || []).forEach((url: string) => {
         urlToCount.set(url, (urlToCount.get(url) || 0) + 1)
       })
     })
 
     // Segundo pass: adicionar fotos únicas por URL
-    scraperJobs.forEach(job => {
+    activeJobs.forEach(job => {
       (job.photos || []).forEach((url: string) => {
-        const photoKey = `${url}` // Deduplica por URL, não jobId
+        const photoKey = `${url}`
         if (!seen.has(photoKey) && !dismissedPhotos.includes(photoKey)) {
           seen.add(photoKey)
           photos.push({
             jobId: job.id,
             url,
             jobTitle: job.file_name,
-            count: urlToCount.get(url) // Quantas vezes aparece
+            count: urlToCount.get(url)
           })
         }
       })
