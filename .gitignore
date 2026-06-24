@@ -60,3 +60,10 @@ scripts/dev/
 
 # TypeScript build info
 *.tsbuildinfo
+
+# Arquivos temporários de deduplicação
+dedup-analysis-*.json
+dedup-backup-*.json
+dedup-log-*.json
+dedup-manifest.json
+backup-*.sql
