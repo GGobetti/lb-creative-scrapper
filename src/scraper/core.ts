@@ -70,7 +70,9 @@ export class ScraperCore {
   private supabase: SupabaseClient;
   private globalPhotoHashCache = new Map<string, string>();
   private entityPhotoHashCache = new Map<string, Set<string>>();
+  private photoHashToUrlCache = new Map<string, string>(); // hash → URL canônica já no storage
   private cacheFile: string;
+  private urlCacheFile: string;
   private tempDir: string;
 
   constructor(
@@ -82,8 +84,10 @@ export class ScraperCore {
   ) {
     this.supabase = createClient(supabaseUrl, supabaseKey);
     this.cacheFile = cacheFile;
+    this.urlCacheFile = path.join(path.dirname(cacheFile), "photo_url_cache.json");
     this.tempDir = path.dirname(cacheFile);
     this.loadHashCache();
+    this.loadUrlCache();
   }
 
   loadHashCache(): void {
@@ -109,6 +113,31 @@ export class ScraperCore {
       console.log(`[Cache] ${this.globalPhotoHashCache.size} hashes salvos`);
     } catch (e: any) {
       console.warn(`[Cache] Falha ao salvar: ${e.message}`);
+    }
+  }
+
+  private loadUrlCache(): void {
+    try {
+      if (fs.existsSync(this.urlCacheFile)) {
+        const data = JSON.parse(fs.readFileSync(this.urlCacheFile, "utf-8"));
+        for (const [h, url] of Object.entries(data)) {
+          this.photoHashToUrlCache.set(h, url as string);
+        }
+        console.log(`[UrlCache] ${this.photoHashToUrlCache.size} URLs canônicas carregadas`);
+      }
+    } catch (e: any) {
+      console.warn(`[UrlCache] Falha ao carregar: ${e.message}`);
+    }
+  }
+
+  private saveUrlCache(): void {
+    try {
+      if (!fs.existsSync(this.tempDir)) fs.mkdirSync(this.tempDir, { recursive: true });
+      const data: Record<string, string> = {};
+      for (const [h, url] of this.photoHashToUrlCache) data[h] = url;
+      fs.writeFileSync(this.urlCacheFile, JSON.stringify(data));
+    } catch (e: any) {
+      console.warn(`[UrlCache] Falha ao salvar: ${e.message}`);
     }
   }
 
@@ -305,6 +334,16 @@ export class ScraperCore {
           }
         } catch {}
 
+        // Reutilizar URL canônica se já temos esta imagem no storage
+        if (photoHash && this.photoHashToUrlCache.has(photoHash)) {
+          const existingUrl = this.photoHashToUrlCache.get(photoHash)!;
+          try { fs.unlinkSync(downloaded); } catch {}
+          photoUrlsMap.set(photoMsg.id, existingUrl);
+          photoHashByUrl.set(existingUrl, photoHash);
+          console.log(`[Core] Foto reutilizada (hash já existe): ${existingUrl.split("/").pop()}`);
+          continue;
+        }
+
         const fileBuffer = fs.readFileSync(downloaded);
         const uploadPath = `telegram/photo_${Date.now()}_${i}.jpg`;
         const { error: upErr } = await this.supabase.storage
@@ -317,7 +356,11 @@ export class ScraperCore {
 
         const { data: { publicUrl } } = this.supabase.storage.from("portfolio").getPublicUrl(uploadPath);
         photoUrlsMap.set(photoMsg.id, publicUrl);
-        if (photoHash) photoHashByUrl.set(publicUrl, photoHash);
+        if (photoHash) {
+          photoHashByUrl.set(publicUrl, photoHash);
+          this.photoHashToUrlCache.set(photoHash, publicUrl); // Registrar para reutilização futura
+          this.saveUrlCache();
+        }
         console.log(`[Core] Foto disponível: ${publicUrl}`);
       } catch (e: any) {
         console.error(`[Core] Erro foto ${i + 1}: ${e.message}`);
