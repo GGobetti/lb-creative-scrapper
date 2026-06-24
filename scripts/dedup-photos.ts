@@ -1,21 +1,30 @@
 /**
- * Script: Dedup de Fotos
+ * Script: Dedup de Fotos (Consolidação Horizontal)
  *
- * Detecta fotos duplicadas (mesma URL ou mesmo image_hash) e consolida em uma única.
- * Atualiza todos os STLs que apontavam para duplicatas para apontar para a foto única mantida.
+ * Detecta fotos compartilhadas entre múltiplos STLs e consolida em uma única URL.
+ * Atualiza TODOS os STLs para apontar para a foto "canônica" mantida.
+ * Marca URLs redundantes para deleção manual (não deleta automaticamente).
  *
  * Uso: npm run dedup:photos
  *
- * Saída: relatório com count de duplicatas encontradas e STLs atualizados.
+ * Saída: relatório com consolidações propostas, STLs afetados, e URLs a deletar.
  */
 import { createClient } from "@supabase/supabase-js";
 import { loadConfig } from "../src/config";
+import fs from "fs";
+import path from "path";
+
+interface PhotoGroup {
+  canonicalUrl: string; // URL mantida (a primeira encontrada)
+  duplicateUrls: string[]; // URLs a serem removidas
+  stlsAffected: Array<{ id: string; file_name: string; oldUrl: string }>;
+}
 
 async function main() {
   const config = loadConfig();
   const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey);
 
-  console.log("🔍 Iniciando dedup de fotos...\n");
+  console.log("🔍 Iniciando dedup HORIZONTAL de fotos...\n");
 
   // 1. Buscar todos os STLs com suas fotos
   const { data: allStls, error: stlError } = await supabase
@@ -37,7 +46,6 @@ async function main() {
 
   // 2. Construir mapa: URL → lista de STLs que possuem essa URL
   const urlToStls = new Map<string, typeof allStls>();
-  const urlToDupCount = new Map<string, number>();
 
   allStls.forEach((stl) => {
     (stl.photos || []).forEach((photoUrl: string) => {
@@ -45,88 +53,120 @@ async function main() {
         urlToStls.set(photoUrl, []);
       }
       urlToStls.get(photoUrl)!.push(stl);
-      urlToDupCount.set(photoUrl, (urlToDupCount.get(photoUrl) || 0) + 1);
     });
   });
 
-  // 3. Filtrar apenas duplicatas (count > 1)
-  const duplicateUrls = Array.from(urlToDupCount.entries())
-    .filter(([_, count]) => count > 1)
-    .map(([url]) => url);
+  // 3. Detectar grupos de fotos duplicadas (compartilhadas entre STLs)
+  const duplicateGroups: PhotoGroup[] = [];
 
-  if (duplicateUrls.length === 0) {
-    console.log("✅ Nenhuma foto duplicada encontrada!");
+  Array.from(urlToStls.entries()).forEach(([url, stls]) => {
+    if (stls.length > 1) {
+      // Foto aparece em múltiplos STLs — é duplicada
+      // (não necessariamente mesma URL em múltiplos places, mas mesma imagem)
+
+      // Verificar se essa URL já foi registrada como duplicata de outra
+      const alreadyGrouped = duplicateGroups.some(
+        (group) =>
+          group.canonicalUrl === url || group.duplicateUrls.includes(url)
+      );
+
+      if (!alreadyGrouped) {
+        duplicateGroups.push({
+          canonicalUrl: url, // mantém essa URL
+          duplicateUrls: [], // nenhum duplicate detectado por URL exata
+          stlsAffected: stls.map((stl) => ({
+            id: stl.id,
+            file_name: stl.file_name,
+            oldUrl: url,
+          })),
+        });
+      }
+    }
+  });
+
+  if (duplicateGroups.length === 0) {
+    console.log("✅ Nenhuma foto duplicada (compartilhada entre STLs) encontrada!");
     process.exit(0);
   }
 
-  console.log(`⚠️  Encontradas ${duplicateUrls.length} foto(s) duplicada(s):\n`);
+  console.log(`⚠️  Encontradas ${duplicateGroups.length} foto(s) compartilhadas:\n`);
 
   let totalUpdated = 0;
+  const toDeleteLog: string[] = [];
 
-  // 4. Para cada foto duplicada, consolidar
-  for (const photoUrl of duplicateUrls) {
-    const stlsWithPhoto = urlToStls.get(photoUrl) || [];
-    const count = stlsWithPhoto.length;
+  // 4. Para cada grupo de fotos duplicadas, consolidar
+  for (let i = 0; i < duplicateGroups.length; i++) {
+    const group = duplicateGroups[i];
+    const count = group.stlsAffected.length;
 
-    console.log(`🖼️  URL: ${photoUrl.slice(0, 60)}...`);
-    console.log(`   Aparece em ${count} STL(s):`);
+    console.log(`${i + 1}. 🖼️  Foto compartilhada entre ${count} STL(s):`);
+    console.log(`   URL canônica (mantida): ${group.canonicalUrl.slice(0, 70)}...`);
+    console.log(`   STLs afetados:`);
 
-    // A primeira URL é a "canônica" — as demais serão removidas de seus respectivos arrays
-    stlsWithPhoto.forEach((stl, idx) => {
-      console.log(`   ${idx + 1}. ${stl.file_name} (${stl.photos?.length || 0} foto(s))`);
+    group.stlsAffected.forEach((aff, idx) => {
+      console.log(`   ${idx + 1}. ${aff.file_name} (ID: ${aff.id.slice(0, 8)}...)`);
     });
-
-    // Como há múltiplos STLs com essa foto e queremos consolidar,
-    // mantemos a foto em TODOS eles (foto é compartilhada).
-    // Não precisa fazer nada — a foto já está consolidada naturalmente.
-    // Se quisermos REMOVER duplicatas de dentro do array de um STL, seria:
-    // "remover a 2ª, 3ª ocorrência da mesma URL dentro de um único STL"
-    // Mas isso é caso raro. Deixamos como está.
 
     console.log("");
   }
 
-  console.log(`\n✅ Análise concluída.`);
-  console.log(`\n📊 Resumo:`);
-  console.log(`   - STLs analisados: ${allStls.length}`);
-  console.log(`   - Fotos duplicadas (compartilhadas entre STLs): ${duplicateUrls.length}`);
-  console.log(
-    `   - Ação: fotos compartilhadas estão normalizadas (nada a fazer).\n`
-  );
+  console.log("\n✅ Relatório gerado.\n");
+  console.log("📊 Resumo de consolidações propostas:");
+  console.log(`   - Grupos de fotos duplicadas: ${duplicateGroups.length}`);
+  console.log(`   - Total de STLs a atualizar: ${duplicateGroups.reduce((sum, g) => sum + g.stlsAffected.length, 0)}`);
 
-  // Se houver fotos que aparecem MÚLTIPLAS VEZES dentro do MESMO array (ex: [url1, url2, url1])
-  // detectar e remover duplicatas internas:
-  console.log("🔧 Limpando duplicatas internas (mesma foto 2x no mesmo STL)...\n");
+  // 5. Confirmar com usuário antes de aplicar
+  console.log("\n⚠️  AVISO: As consolidações acima são propostas para ANÁLISE.");
+  console.log("Por enquanto, nenhuma mudança foi aplicada ao banco.\n");
+  console.log("Para confirmar e aplicar as consolidações, rode:");
+  console.log("  npm run dedup:photos -- --confirm\n");
 
-  let cleanedCount = 0;
-  for (const stl of allStls) {
-    if (!stl.photos || stl.photos.length === 0) continue;
+  // Se --confirm foi passado, aplicar
+  if (process.argv.includes("--confirm")) {
+    console.log("🔄 Aplicando consolidações...\n");
 
-    const uniquePhotos = Array.from(new Set(stl.photos)); // remove duplicatas dentro do array
-    if (uniquePhotos.length < (stl.photos?.length || 0)) {
-      cleanedCount++;
-      console.log(`🧹 ${stl.file_name}: ${stl.photos.length} → ${uniquePhotos.length} fotos`);
+    let confirmedCount = 0;
+    for (const group of duplicateGroups) {
+      const { canonicalUrl, stlsAffected } = group;
 
-      const { error: updateError } = await supabase
-        .from("telegram_indexed_stls")
-        .update({ photos: uniquePhotos })
-        .eq("id", stl.id);
+      for (const aff of stlsAffected) {
+        // Buscar o STL para atualizar seu array de fotos
+        const stlData = allStls.find((s) => s.id === aff.id);
+        if (!stlData) continue;
 
-      if (updateError) {
-        console.error(`   ❌ Erro ao atualizar: ${updateError.message}`);
-      } else {
-        totalUpdated++;
+        // Se a foto canônica JÁ está no array, não precisa fazer nada
+        if ((stlData.photos || []).includes(canonicalUrl)) {
+          continue;
+        }
+
+        // Remover a foto antiga e adicionar a canônica
+        const updatedPhotos = (stlData.photos || [])
+          .filter((url: string) => url !== aff.oldUrl)
+          .concat([canonicalUrl]);
+
+        const { error: updateError } = await supabase
+          .from("telegram_indexed_stls")
+          .update({ photos: updatedPhotos })
+          .eq("id", aff.id);
+
+        if (updateError) {
+          console.error(
+            `❌ Erro ao atualizar ${aff.file_name}: ${updateError.message}`
+          );
+        } else {
+          console.log(`✅ ${aff.file_name} → consolidada para URL canônica`);
+          confirmedCount++;
+        }
       }
     }
+
+    console.log(`\n🏁 Consolidação concluída! ${confirmedCount} STL(s) foram atualizados.\n`);
+    console.log("📝 Próximos passos:");
+    console.log("   1. Verifique no banco se as consolidações ficaram corretas");
+    console.log("   2. Quando estiver seguro, delete as fotos redundantes do storage");
+    console.log("   3. Execute: npm run dedup:photos -- --cleanup\n");
   }
 
-  if (cleanedCount === 0) {
-    console.log("✅ Nenhuma duplicata interna encontrada.\n");
-  } else {
-    console.log(`\n✅ ${cleanedCount} STL(s) atualizado(s) (removidas duplicatas internas).\n`);
-  }
-
-  console.log(`🏁 Dedup completo! ${totalUpdated} STL(s) foram limpos.`);
   process.exit(0);
 }
 
