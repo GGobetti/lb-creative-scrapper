@@ -1,6 +1,8 @@
 /**
  * Script: Dedup de Fotos por Conteúdo (Perceptual Hash)
  *
+ * Processa DUAS tabelas: telegram_indexed_stls + telegram_scraper_jobs
+ *
  * 3 estágios:
  * 1. npm run dedup:photos
  *    → Baixa cada imagem, calcula perceptual hash
@@ -8,8 +10,8 @@
  *    → Gera manifesto (dedup-manifest.json)
  *
  * 2. npm run dedup:photos -- --confirm
- *    → Aplica consolidações no banco
- *    → STLs que apontavam para URL redundante agora apontam para URL canônica
+ *    → Aplica consolidações no banco (ambas as tabelas)
+ *    → STLs e jobs que apontavam para URL redundante agora apontam para URL canônica
  *
  * 3. npm run dedup:photos -- --cleanup
  *    → Deleta URLs redundantes do storage (com validações de safety)
@@ -28,6 +30,8 @@ interface HashGroup {
   redundantUrls: string[];
   stlsWithCanonical: Array<{ id: string; file_name: string }>;
   stlsWithRedundant: Array<{ id: string; file_name: string; oldUrl: string }>;
+  jobsWithCanonical: Array<{ id: string; file_name: string }>;
+  jobsWithRedundant: Array<{ id: string; file_name: string; oldUrl: string }>;
 }
 
 interface DedupManifest {
@@ -39,12 +43,12 @@ interface DedupManifest {
 async function getImageHash(imageUrl: string, retries = 3): Promise<{ hash: string | null; error: string | null; fileSize: number | null }> {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(imageUrl, { timeout: 30000 }); // 30s timeout
+      const res = await fetch(imageUrl, { timeout: 30000 });
       if (!res.ok) {
         if (attempt === retries) {
           return { hash: null, error: `HTTP ${res.status}`, fileSize: null };
         }
-        await new Promise((r) => setTimeout(r, 1000 * attempt)); // backoff
+        await new Promise((r) => setTimeout(r, 1000 * attempt));
         continue;
       }
 
@@ -82,9 +86,46 @@ async function main() {
   const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey);
   const manifestPath = path.join(process.cwd(), "dedup-manifest.json");
 
-  console.log("🔍 Script: Dedup de Fotos por Conteúdo (Perceptual Hash)\n");
+  const isConfirm = process.argv.includes("--confirm");
+  const isCleanup = process.argv.includes("--cleanup");
 
-  // 1. Buscar todos os STLs com suas fotos
+  console.log("🔍 Script: Dedup de Fotos por Conteúdo (Perceptual Hash)\n");
+  console.log("   Tabelas: telegram_indexed_stls + telegram_scraper_jobs\n");
+
+  // --confirm e --cleanup carregam o manifesto existente — não re-hasheiam nada
+  if (isConfirm || isCleanup) {
+    if (!fs.existsSync(manifestPath)) {
+      console.error("❌ dedup-manifest.json não encontrado. Rode primeiro sem flags para detectar duplicatas.");
+      process.exit(1);
+    }
+    const manifest: DedupManifest = JSON.parse(fs.readFileSync(manifestPath, "utf-8"));
+    console.log(`📋 Manifesto carregado (stage: ${manifest.stage}, ${manifest.hashGroups.length} grupos)\n`);
+
+    if (isConfirm) {
+      if (manifest.stage !== "detected") {
+        console.error(`❌ Manifesto já está em stage "${manifest.stage}". Só pode confirmar a partir de "detected".`);
+        process.exit(1);
+      }
+      // Buscar dados atuais para backup
+      const { data: stls } = await supabase.from("telegram_indexed_stls").select("id, file_name, photos").eq("is_deleted", false);
+      const { data: jobs } = await supabase.from("telegram_scraper_jobs").select("id, file_name, photos").neq("file_name", "__photo_bucket__").not("photos", "is", null);
+      await confirmStage(supabase, stls || [], (jobs || []).filter((j: any) => (j.photos || []).length > 0), manifestPath, manifest);
+    }
+
+    if (isCleanup) {
+      if (manifest.stage !== "confirmed") {
+        console.error(`❌ Manifesto está em stage "${manifest.stage}". Execute --confirm antes do --cleanup.`);
+        process.exit(1);
+      }
+      await cleanupStage(supabase, manifestPath, manifest);
+    }
+
+    process.exit(0);
+  }
+
+  // --- DETECÇÃO (sem flags) ---
+
+  // 1. Buscar todos os STLs indexados
   const { data: allStls, error: stlError } = await supabase
     .from("telegram_indexed_stls")
     .select("id, file_name, photos")
@@ -95,37 +136,47 @@ async function main() {
     process.exit(1);
   }
 
-  if (!allStls || allStls.length === 0) {
-    console.log("ℹ️  Nenhum STL encontrado.");
-    process.exit(0);
+  // 2. Buscar todos os jobs do scrapper (exceto __photo_bucket__ e sem fotos)
+  const { data: allJobs, error: jobError } = await supabase
+    .from("telegram_scraper_jobs")
+    .select("id, file_name, photos")
+    .neq("file_name", "__photo_bucket__")
+    .not("photos", "is", null);
+
+  if (jobError) {
+    console.error("❌ Erro ao buscar jobs:", jobError.message);
+    process.exit(1);
   }
 
-  console.log(`📦 Encontrados ${allStls.length} STLs.\n`);
+  const safeStls = allStls || [];
+  const safeJobs = (allJobs || []).filter((j: any) => (j.photos || []).length > 0);
 
-  // 2. Coletar todas as URLs únicas de fotos
+  console.log(`📦 STLs indexados: ${safeStls.length}`);
+  console.log(`🔧 Jobs do scrapper com fotos: ${safeJobs.length}\n`);
+
+  // 3. Coletar todas as URLs únicas de ambas as tabelas
   const allUrls = new Set<string>();
-  allStls.forEach((stl) => {
-    (stl.photos || []).forEach((url: string) => {
-      allUrls.add(url);
-    });
+  safeStls.forEach((stl: any) => {
+    (stl.photos || []).forEach((url: string) => allUrls.add(url));
+  });
+  safeJobs.forEach((job: any) => {
+    (job.photos || []).forEach((url: string) => allUrls.add(url));
   });
 
-  console.log(`📸 Encontradas ${allUrls.size} URLs únicas de fotos.\n`);
+  console.log(`📸 URLs únicas totais: ${allUrls.size}\n`);
   console.log("🔄 Calculando perceptual hashes (retry automático 3x, timeout 30s)...\n");
 
-  // 3. Calcular hash de cada URL com retry
+  // 4. Calcular hash de cada URL
   const urlToHash = new Map<string, string>();
   const urlToFileSize = new Map<string, number>();
   const failedUrls: Array<{ url: string; error: string }> = [];
   let processedCount = 0;
 
   for (const url of allUrls) {
-    const result = await getImageHash(url, 3); // 3 tentativas
+    const result = await getImageHash(url, 3);
     if (result.hash) {
       urlToHash.set(url, result.hash);
-      if (result.fileSize) {
-        urlToFileSize.set(url, result.fileSize);
-      }
+      if (result.fileSize) urlToFileSize.set(url, result.fileSize);
     } else if (result.error) {
       failedUrls.push({ url, error: result.error });
     }
@@ -135,60 +186,68 @@ async function main() {
     }
   }
 
-  console.log(`\n✅ ${urlToHash.size}/${allUrls.size} fotos foram hashadas com sucesso.`);
+  console.log(`\n✅ ${urlToHash.size}/${allUrls.size} fotos hashadas com sucesso.`);
   console.log(`⚠️  ${failedUrls.length} URLs falharam ao fazer hash.\n`);
 
-  // 4. Agrupar URLs pelo hash
+  // 5. Agrupar URLs pelo hash
   const hashToUrls = new Map<string, string[]>();
   urlToHash.forEach((hash, url) => {
-    if (!hashToUrls.has(hash)) {
-      hashToUrls.set(hash, []);
-    }
+    if (!hashToUrls.has(hash)) hashToUrls.set(hash, []);
     hashToUrls.get(hash)!.push(url);
   });
 
-  // 5. Construir mapa URL → STLs que a possuem
-  const urlToStls = new Map<string, typeof allStls>();
-  allStls.forEach((stl) => {
+  // 6. Mapas URL → STLs e URL → Jobs
+  const urlToStls = new Map<string, typeof safeStls>();
+  safeStls.forEach((stl: any) => {
     (stl.photos || []).forEach((url: string) => {
-      if (!urlToStls.has(url)) {
-        urlToStls.set(url, []);
-      }
+      if (!urlToStls.has(url)) urlToStls.set(url, []);
       urlToStls.get(url)!.push(stl);
     });
   });
 
-  // 6. Detectar grupos com duplicatas (múltiplas URLs = mesma imagem)
+  const urlToJobs = new Map<string, typeof safeJobs>();
+  safeJobs.forEach((job: any) => {
+    (job.photos || []).forEach((url: string) => {
+      if (!urlToJobs.has(url)) urlToJobs.set(url, []);
+      urlToJobs.get(url)!.push(job);
+    });
+  });
+
+  // 7. Detectar grupos com duplicatas
   const hashGroups: HashGroup[] = [];
 
   Array.from(hashToUrls.entries()).forEach(([hash, urls]) => {
-    if (urls.length > 1) {
-      // Múltiplas URLs com mesmo hash = fotos iguais
-      const canonicalUrl = urls[0]; // Primeira URL é canônica
-      const redundantUrls = urls.slice(1);
+    if (urls.length <= 1) return;
 
-      const stlsWithCanonical = urlToStls.get(canonicalUrl) || [];
-      const stlsWithRedundant: HashGroup["stlsWithRedundant"] = [];
+    // Preferir URL canônica que já está em indexed_stls (mais estável)
+    const urlInStls = urls.find(u => urlToStls.has(u));
+    const canonicalUrl = urlInStls || urls[0];
+    const redundantUrls = urls.filter(u => u !== canonicalUrl);
 
-      redundantUrls.forEach((redUrl) => {
-        const stls = urlToStls.get(redUrl) || [];
-        stls.forEach((stl) => {
-          stlsWithRedundant.push({
-            id: stl.id,
-            file_name: stl.file_name,
-            oldUrl: redUrl,
-          });
-        });
+    const stlsWithCanonical = urlToStls.get(canonicalUrl) || [];
+    const jobsWithCanonical = urlToJobs.get(canonicalUrl) || [];
+
+    const stlsWithRedundant: HashGroup["stlsWithRedundant"] = [];
+    const jobsWithRedundant: HashGroup["jobsWithRedundant"] = [];
+
+    redundantUrls.forEach((redUrl) => {
+      (urlToStls.get(redUrl) || []).forEach((stl: any) => {
+        stlsWithRedundant.push({ id: stl.id, file_name: stl.file_name, oldUrl: redUrl });
       });
-
-      hashGroups.push({
-        hash,
-        canonicalUrl,
-        redundantUrls,
-        stlsWithCanonical: stlsWithCanonical.map((s) => ({ id: s.id, file_name: s.file_name })),
-        stlsWithRedundant,
+      (urlToJobs.get(redUrl) || []).forEach((job: any) => {
+        jobsWithRedundant.push({ id: job.id, file_name: job.file_name, oldUrl: redUrl });
       });
-    }
+    });
+
+    hashGroups.push({
+      hash,
+      canonicalUrl,
+      redundantUrls,
+      stlsWithCanonical: stlsWithCanonical.map((s: any) => ({ id: s.id, file_name: s.file_name })),
+      stlsWithRedundant,
+      jobsWithCanonical: jobsWithCanonical.map((j: any) => ({ id: j.id, file_name: j.file_name })),
+      jobsWithRedundant,
+    });
   });
 
   if (hashGroups.length === 0) {
@@ -196,87 +255,66 @@ async function main() {
     process.exit(0);
   }
 
-  // 7. Mostrar relatório
+  // 8. Relatório
+  const totalRedundantUrls = hashGroups.reduce((sum, g) => sum + g.redundantUrls.length, 0);
+  const totalStlsAffected = hashGroups.reduce((sum, g) => sum + g.stlsWithRedundant.length, 0);
+  const totalJobsAffected = hashGroups.reduce((sum, g) => sum + g.jobsWithRedundant.length, 0);
+
   console.log(`⚠️  Encontrados ${hashGroups.length} grupo(s) de fotos iguais:\n`);
-
-  let totalStlsAffected = 0;
-  hashGroups.forEach((group, i) => {
-    const totalStls = group.stlsWithCanonical.length + group.stlsWithRedundant.length;
-    totalStlsAffected += totalStls;
-
+  hashGroups.slice(0, 5).forEach((group, i) => {
     console.log(`${i + 1}. Hash: ${group.hash}`);
-    console.log(`   URLs duplicadas: ${group.redundantUrls.length + 1}`);
-    console.log(`   URL canônica (mantida): ${group.canonicalUrl.slice(0, 70)}...`);
-    console.log(`   URLs redundantes (a deletar):`);
-    group.redundantUrls.forEach((url) => {
-      console.log(`     - ${url.slice(0, 70)}...`);
-    });
-    console.log(`   STLs afetados: ${totalStls}`);
-    group.stlsWithRedundant.forEach((stl) => {
-      console.log(`     - ${stl.file_name} (${stl.oldUrl.slice(0, 50)}... → canônica)`);
-    });
+    console.log(`   URL canônica: ${group.canonicalUrl.slice(0, 70)}...`);
+    console.log(`   URLs redundantes: ${group.redundantUrls.length}`);
+    console.log(`   STLs a corrigir: ${group.stlsWithRedundant.length} | Jobs a corrigir: ${group.jobsWithRedundant.length}`);
     console.log("");
   });
+  if (hashGroups.length > 5) console.log(`   ... e mais ${hashGroups.length - 5} grupos (ver análise)\n`);
 
-  // 8. Gerar análise detalhada e manifesto
+  // 9. Gerar análise e manifesto
   const analysisPath = path.join(process.cwd(), `dedup-analysis-${new Date().toISOString().replace(/[:.]/g, "-")}.json`);
-  const analysis = {
+  fs.writeFileSync(analysisPath, JSON.stringify({
     timestamp: new Date().toISOString(),
     summary: {
-      total_stls: allStls.length,
+      total_stls: safeStls.length,
+      total_jobs: safeJobs.length,
       total_unique_urls: allUrls.size,
       urls_hashed_success: urlToHash.size,
       urls_hashed_failed: failedUrls.length,
       hash_success_rate: `${Math.round((urlToHash.size / allUrls.size) * 100)}%`,
       duplicate_groups_found: hashGroups.length,
-      total_urls_redundant: hashGroups.reduce((sum, g) => sum + g.redundantUrls.length, 0),
-      total_stls_affected: totalStlsAffected,
+      total_urls_redundant: totalRedundantUrls,
+      total_stls_to_update: totalStlsAffected,
+      total_jobs_to_update: totalJobsAffected,
     },
-    failed_urls: failedUrls.slice(0, 50), // Primeiros 50 falhas
-    hash_groups_preview: hashGroups.slice(0, 5), // Preview dos primeiros 5 grupos
+    failed_urls: failedUrls.slice(0, 50),
     all_hash_groups: hashGroups,
-  };
-
-  fs.writeFileSync(analysisPath, JSON.stringify(analysis, null, 2));
-  console.log(`✅ Análise detalhada gerada: ${path.basename(analysisPath)}\n`);
+  }, null, 2));
+  console.log(`✅ Análise detalhada: ${path.basename(analysisPath)}\n`);
 
   const manifest: DedupManifest = {
     timestamp: new Date().toISOString(),
     stage: "detected",
     hashGroups,
   };
-
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
-  console.log(`✅ Manifesto gerado: dedup-manifest.json\n`);
+  console.log(`✅ Manifesto: dedup-manifest.json\n`);
 
   console.log("📊 Resumo:");
-  console.log(`   - Total de STLs: ${allStls.length}`);
-  console.log(`   - URLs únicas: ${allUrls.size}`);
-  console.log(`   - URLs hasheadas: ${urlToHash.size}/${allUrls.size} (${Math.round((urlToHash.size / allUrls.size) * 100)}%)`);
   console.log(`   - Grupos de fotos iguais: ${hashGroups.length}`);
-  console.log(`   - Total de URLs redundantes: ${hashGroups.reduce((sum, g) => sum + g.redundantUrls.length, 0)}`);
-  console.log(`   - Total de STLs a atualizar: ${totalStlsAffected}\n`);
+  console.log(`   - URLs redundantes: ${totalRedundantUrls}`);
+  console.log(`   - STLs indexados a corrigir: ${totalStlsAffected}`);
+  console.log(`   - Jobs do scrapper a corrigir: ${totalJobsAffected}\n`);
 
   if (failedUrls.length > 0) {
-    console.log(`⚠️  ${failedUrls.length} URLs falharam ao fazer hash:`);
+    console.log(`⚠️  ${failedUrls.length} URLs falharam:`);
     failedUrls.slice(0, 5).forEach((item) => {
       console.log(`   - ${item.url.slice(0, 70)}... (${item.error})`);
     });
-    if (failedUrls.length > 5) {
-      console.log(`   ... e mais ${failedUrls.length - 5} (ver em ${path.basename(analysisPath)})\n`);
-    }
+    if (failedUrls.length > 5) console.log(`   ... e mais ${failedUrls.length - 5}\n`);
   }
 
-  // 9. Próximos passos
-  if (process.argv.includes("--confirm")) {
-    await confirmStage(supabase, allStls, manifestPath, manifest);
-  } else {
-    console.log("📋 Revise os arquivos gerados ANTES de confirmar:");
-    console.log(`   1. cat ${path.basename(analysisPath)}`);
-    console.log(`   2. Verifique os grupos de fotos duplicadas`);
-    console.log(`   3. Se estiver tudo certo, rode:\n`);
-    console.log("   npm run dedup:photos -- --confirm\n");
-  }
+  console.log("📋 Se estiver tudo certo, rode:");
+  console.log("   npm run dedup:photos -- --confirm\n");
 
   process.exit(0);
 }
@@ -284,96 +322,140 @@ async function main() {
 async function confirmStage(
   supabase: any,
   allStls: any[],
+  allJobs: any[],
   manifestPath: string,
   manifest: DedupManifest
 ) {
-  console.log("\n🔄 STAGE: Aplicando consolidações...\n");
+  console.log("\n🔄 STAGE: Aplicando consolidações (STLs + Jobs)...\n");
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
   const backupPath = path.join(process.cwd(), `dedup-backup-${timestamp}.json`);
   const logPath = path.join(process.cwd(), `dedup-log-${timestamp}.json`);
 
-  // 1. Backup ANTES de aplicar mudanças
-  console.log("💾 Criando backup do estado atual...");
-  const backup = {
+  // Backup completo antes de qualquer mudança
+  console.log("💾 Criando backup...");
+  fs.writeFileSync(backupPath, JSON.stringify({
     timestamp: new Date().toISOString(),
-    totalStls: allStls.length,
-    stls: allStls.map((stl) => ({
-      id: stl.id,
-      file_name: stl.file_name,
-      photos: stl.photos || [],
-    })),
-  };
-  fs.writeFileSync(backupPath, JSON.stringify(backup, null, 2));
-  console.log(`✅ Backup salvo em: ${backupPath}\n`);
+    stls: allStls.map((s) => ({ id: s.id, file_name: s.file_name, photos: s.photos || [] })),
+    jobs: allJobs.map((j) => ({ id: j.id, file_name: j.file_name, photos: j.photos || [] })),
+  }, null, 2));
+  console.log(`✅ Backup: ${path.basename(backupPath)}\n`);
 
-  // 2. Aplicar consolidações com log detalhado
   const changes: any[] = [];
-  let confirmedCount = 0;
+  let stlCount = 0;
+  let jobCount = 0;
 
+  // Atualizar STLs
+  console.log("📚 Atualizando telegram_indexed_stls...");
   for (const group of manifest.hashGroups) {
     for (const aff of group.stlsWithRedundant) {
       const stlData = allStls.find((s) => s.id === aff.id);
       if (!stlData) continue;
 
       const oldPhotos = [...(stlData.photos || [])];
-
-      // Remover URL redundante, adicionar URL canônica
       const updatedPhotos = (stlData.photos || [])
-        .filter((url: string) => url !== aff.oldUrl) // Remove redundante
-        .concat([group.canonicalUrl]) // Adiciona canônica
-        .filter((url: string, idx: number, arr: string[]) => arr.indexOf(url) === idx); // Dedup
+        .filter((url: string) => url !== aff.oldUrl)
+        .concat([group.canonicalUrl])
+        .filter((url: string, idx: number, arr: string[]) => arr.indexOf(url) === idx);
 
-      const { error: updateError } = await supabase
+      const { error } = await supabase
         .from("telegram_indexed_stls")
         .update({ photos: updatedPhotos })
         .eq("id", aff.id);
 
-      if (updateError) {
-        console.error(`❌ Erro ao atualizar ${aff.file_name}: ${updateError.message}`);
+      if (error) {
+        console.error(`  ❌ STL ${aff.file_name}: ${error.message}`);
       } else {
-        console.log(`✅ ${aff.file_name}`);
-        confirmedCount++;
-
-        // Registrar mudança no log
-        changes.push({
-          stl_id: aff.id,
-          stl_name: aff.file_name,
-          hash_group: group.hash,
-          old_url: aff.oldUrl,
-          canonical_url: group.canonicalUrl,
-          old_photos: oldPhotos,
-          new_photos: updatedPhotos,
-          timestamp: new Date().toISOString(),
-        });
+        console.log(`  ✅ STL: ${aff.file_name}`);
+        stlCount++;
+        changes.push({ table: "telegram_indexed_stls", id: aff.id, file_name: aff.file_name, hash_group: group.hash, old_url: aff.oldUrl, canonical_url: group.canonicalUrl, old_photos: oldPhotos, new_photos: updatedPhotos });
       }
     }
   }
 
-  // 3. Salvar log detalhado
-  const log = {
-    timestamp: new Date().toISOString(),
-    stage: "confirmed",
-    total_changes: confirmedCount,
-    changes,
-    manifest_path: manifestPath,
-    backup_path: backupPath,
-  };
-  fs.writeFileSync(logPath, JSON.stringify(log, null, 2));
-  console.log(`\n📝 Log detalhado salvo em: ${logPath}\n`);
+  // Atualizar Jobs
+  console.log(`\n🔧 Atualizando telegram_scraper_jobs...`);
+  for (const group of manifest.hashGroups) {
+    for (const aff of group.jobsWithRedundant) {
+      const jobData = allJobs.find((j) => j.id === aff.id);
+      if (!jobData) continue;
 
-  // Atualizar manifesto
+      const oldPhotos = [...(jobData.photos || [])];
+      const updatedPhotos = (jobData.photos || [])
+        .filter((url: string) => url !== aff.oldUrl)
+        .concat([group.canonicalUrl])
+        .filter((url: string, idx: number, arr: string[]) => arr.indexOf(url) === idx);
+
+      const { error } = await supabase
+        .from("telegram_scraper_jobs")
+        .update({ photos: updatedPhotos })
+        .eq("id", aff.id);
+
+      if (error) {
+        console.error(`  ❌ Job ${aff.file_name}: ${error.message}`);
+      } else {
+        console.log(`  ✅ Job: ${aff.file_name}`);
+        jobCount++;
+        changes.push({ table: "telegram_scraper_jobs", id: aff.id, file_name: aff.file_name, hash_group: group.hash, old_url: aff.oldUrl, canonical_url: group.canonicalUrl, old_photos: oldPhotos, new_photos: updatedPhotos });
+      }
+    }
+  }
+
+  // Salvar log e atualizar manifesto
+  fs.writeFileSync(logPath, JSON.stringify({ timestamp: new Date().toISOString(), stage: "confirmed", stls_updated: stlCount, jobs_updated: jobCount, total_changes: stlCount + jobCount, changes }, null, 2));
   manifest.stage = "confirmed";
   fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
 
-  console.log(`🏁 Consolidação concluída! ${confirmedCount} STL(s) atualizado(s).\n`);
-  console.log("📦 Arquivos gerados:");
-  console.log(`   - Backup: ${path.basename(backupPath)}`);
+  console.log(`\n🏁 Consolidação concluída!`);
+  console.log(`   - STLs atualizados: ${stlCount}`);
+  console.log(`   - Jobs atualizados: ${jobCount}`);
   console.log(`   - Log: ${path.basename(logPath)}`);
-  console.log(`   - Manifesto: dedup-manifest.json\n`);
-  console.log("📝 Próximo passo:");
+  console.log(`   - Backup: ${path.basename(backupPath)}\n`);
+  console.log("📝 Próximo passo (opcional — deleta URLs redundantes do storage):");
   console.log("   npm run dedup:photos -- --cleanup\n");
-  console.log("   (Isso vai deletar URLs redundantes do storage com SEGURANÇA)\n");
+}
+
+async function cleanupStage(supabase: any, manifestPath: string, manifest: DedupManifest) {
+  console.log("\n🗑️  STAGE: Deletando URLs redundantes do storage...\n");
+
+  // Coletar todas as URLs canônicas para garantir que nunca sejam deletadas
+  const canonicalUrls = new Set(manifest.hashGroups.map(g => g.canonicalUrl));
+  const allRedundant = manifest.hashGroups.flatMap(g => g.redundantUrls);
+
+  // Dupla verificação de segurança
+  const toDelete = allRedundant.filter(url => !canonicalUrls.has(url));
+  const skipped = allRedundant.length - toDelete.length;
+  if (skipped > 0) console.log(`⚠️  ${skipped} URLs puladas (eram canônicas em outro grupo)\n`);
+
+  let deletedCount = 0;
+  let errorCount = 0;
+
+  for (const url of toDelete) {
+    // Extrair path do bucket da URL do Supabase Storage
+    const match = url.match(/\/storage\/v1\/object\/public\/([^/]+)\/(.+)$/);
+    if (!match) {
+      console.log(`  ⚠️  URL não reconhecida (pulando): ${url.slice(0, 60)}...`);
+      errorCount++;
+      continue;
+    }
+    const [, bucket, filePath] = match;
+
+    const { error } = await supabase.storage.from(bucket).remove([filePath]);
+    if (error) {
+      console.error(`  ❌ ${filePath}: ${error.message}`);
+      errorCount++;
+    } else {
+      console.log(`  🗑️  ${filePath}`);
+      deletedCount++;
+    }
+  }
+
+  manifest.stage = "cleaned";
+  fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2));
+
+  console.log(`\n🏁 Cleanup concluído!`);
+  console.log(`   - Deletadas: ${deletedCount}`);
+  console.log(`   - Erros: ${errorCount}`);
 }
 
 main().catch((e) => {
