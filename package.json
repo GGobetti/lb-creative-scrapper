@@ -5,7 +5,7 @@
   "description": "CLI para escanear grupos Telegram e indexar STLs no LB Creative Studio",
   "main": "dist/index.js",
   "scripts": {
-    "dev": "next dev -p 3001",
+    "dev": "next dev -p 3001 --webpack",
     "dev:scan": "tsx src/index.ts",
     "build": "next build",
     "start": "next start -p 3001",
