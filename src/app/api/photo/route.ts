@@ -23,8 +23,8 @@ export async function GET(req: NextRequest) {
     return new NextResponse("Missing key", { status: 400 });
   }
 
-  // Segurança: só permite chaves dentro de photos/ ou avatars/
-  if (!key.startsWith("photos/") && !key.startsWith("avatars/")) {
+  // Segurança: só permite chaves dentro de prefixos autorizados (não stl/)
+  if (!key.startsWith("photos/") && !key.startsWith("avatars/") && !key.startsWith("local-upload/")) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
