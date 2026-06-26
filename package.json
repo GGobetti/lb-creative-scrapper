@@ -18,7 +18,13 @@
     "dedup:photos": "tsx scripts/dedup-photos.ts",
     "dedup:restore": "tsx scripts/dedup-restore.ts",
     "cleanup:banned": "tsx scripts/cleanup-banned-photos.ts",
-    "regen:telegram": "tsx scripts/regenerate-telegram-session.ts"
+    "cleanup:orphans": "tsx scripts/cleanup-orphan-photos.ts",
+    "regen:telegram": "tsx scripts/regenerate-telegram-session.ts",
+    "snapshot:urls": "tsx scripts/snapshot-urls.ts",
+    "migrate:photos-to-r2": "tsx scripts/migrate-photos-to-r2.ts",
+    "update-photo-urls": "tsx scripts/update-photo-urls-in-db.ts",
+    "validate:migration": "tsx scripts/validate-migration.ts",
+    "cleanup:supabase-photos": "tsx scripts/cleanup-supabase-photos.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1073.0",

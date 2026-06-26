@@ -7,6 +7,7 @@ import { createClient, SupabaseClient } from "@supabase/supabase-js";
 import { getPerceptualHash, hammingDistance } from "./imageHash";
 import { VaultUploader } from "../telegram/vault";
 import { isR2Configured, uploadToR2 } from "../lib/r2";
+import { uploadPhotoToR2 } from "../lib/r2-photos";
 import { BufferedMessage, GroupConfig } from "./types";
 
 const QUEUE_TASK_TIMEOUT_MS = 10 * 60 * 1000;
@@ -345,16 +346,17 @@ export class ScraperCore {
         }
 
         const fileBuffer = fs.readFileSync(downloaded);
-        const uploadPath = `telegram/photo_${Date.now()}_${i}.jpg`;
-        const { error: upErr } = await this.supabase.storage
-          .from("portfolio")
-          .upload(uploadPath, fileBuffer, { contentType: "image/jpeg", upsert: true });
+        const photoFilename = `photo_${Date.now()}_${i}.jpg`;
 
         try { fs.unlinkSync(downloaded); } catch {}
 
-        if (upErr) { console.error(`[Core] Erro upload foto: ${upErr.message}`); continue; }
-
-        const { data: { publicUrl } } = this.supabase.storage.from("portfolio").getPublicUrl(uploadPath);
+        let publicUrl: string;
+        try {
+          publicUrl = await uploadPhotoToR2(fileBuffer, photoFilename);
+        } catch (e: any) {
+          console.error(`[Core] Erro upload foto para R2: ${e.message}`);
+          continue;
+        }
         photoUrlsMap.set(photoMsg.id, publicUrl);
         if (photoHash) {
           photoHashByUrl.set(publicUrl, photoHash);

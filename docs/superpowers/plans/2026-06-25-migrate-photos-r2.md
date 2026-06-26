@@ -2,19 +2,32 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Mover ~1.377 arquivos (fotos + avatars) de Supabase Storage para Cloudflare R2, eliminando limite de egress (5GB/mês) e integrando com infraestrutura R2 já existente para STLs.
+**Goal:** Mover ~1.402 fotos de Supabase Storage para Cloudflare R2, eliminando limite de egress (5GB/mês) e integrando com infraestrutura R2 já existente para STLs.
 
-**Architecture:** R2 será a origem única para todos os arquivos (STLs + fotos + avatars). Scraper fará upload direto em R2. URLs no banco apontarão para R2 CDN. Supabase Storage será esvaziado (apenas banco de dados continua).
+**Architecture:** R2 é a origem única para todos os arquivos (STLs + fotos + avatars). Mesmo bucket `lb-stls` com prefixos: `stl/`, `photos/`, `avatars/`. Scraper faz upload direto em R2. URLs no banco apontam para R2. Supabase Storage esvaziado (apenas banco de dados continua).
 
 **Tech Stack:** Cloudflare R2, AWS SDK S3 (compatível com R2), Supabase (banco), Next.js API routes.
 
 ## Global Constraints
 
-- R2 credenciais já existem (configuradas para STLs)
-- Fotos ativas: 1.376 arquivos (~236 MB) no bucket `portfolio`
-- Avatars: 1 arquivo (~199 KB) no bucket `avatars`
-- URLs atuais: `https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/...`
-- Novas URLs R2: `https://<accountid>.r2.cloudflarestorage.com/photos/...` (fotos) e `/avatars/...` (avatars)
+- R2 credenciais: `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_ACCOUNT_ID` (não `AWS_*`)
+- Bucket único: `lb-stls` (prefixos: `stl/`, `photos/`, `avatars/`)
+- Fotos migradas: 1.377/1.402 únicas (25 já eram órfãs/inexistentes em Supabase)
+- Registros atualizados: 937 thumbnails, 936 arrays de fotos
+- URLs R2: `https://<accountid>.r2.cloudflarestorage.com/lb-stls/photos/<filename>`
+- pasta `telegram/manual/` no Supabase preservada — contém 5 STLs manuais (UUIDs)
+
+## Status de Execução (2026-06-26)
+
+- [x] Task 0: Snapshot de URLs (`backups/migration-2026-06-25/urls-snapshot.json`) ✅
+- [x] Task 2: `src/lib/r2-photos.ts` criado ✅
+- [x] Task 3: 1.377 fotos migradas para R2 ✅
+- [x] Task 4: `src/scraper/core.ts` modificado — novas fotos vão para R2 ✅
+- [x] Task 5: URLs no banco atualizadas (937 thumbnails + 936 arrays) ✅
+- [x] Task 6: Supabase Storage limpo (1.269 arquivos deletados) ✅
+- [x] Validação: `npm run validate:migration` — PASSOU ✅
+- [ ] Task 7: Migrar avatars (bucket `avatars`) — pendente
+- [ ] Task 10: Script de rollback — pendente (não necessário se tudo ok)
 
 ---
 
