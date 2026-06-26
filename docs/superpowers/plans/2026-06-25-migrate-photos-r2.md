@@ -20,15 +20,108 @@
 
 ## File Structure
 
-**New files:**
+**New files (Backup & Validation):**
+- `scripts/snapshot-urls.ts` — Snapshot pré-migração
+- `scripts/validate-pre-migration.ts` — Validação pré-migração
+- `scripts/validate-migration.ts` — Validação pós-migração
+- `scripts/checkpoint-files-in-r2.ts` — Checkpoint após backfill
+- `scripts/checkpoint-urls-updated.ts` — Checkpoint após update
+- `scripts/test-restore-backup.ts` — Test de restauração
+- `scripts/rollback-urls-to-supabase.ts` — Rollback emergência
+- `backups/migration-YYYY-MM-DD/` — Pasta para backups SQL
+
+**New files (Migração):**
 - `scripts/migrate-photos-to-r2.ts` — Backfill de fotos existentes (Supabase → R2)
-- `src/lib/r2-photos.ts` — Funções auxiliares para upload/download de fotos em R2 (similar a `r2.ts` mas específico para fotos)
+- `scripts/migrate-avatars-to-r2.ts` — Backfill de avatars
+- `src/lib/r2-photos.ts` — Funções auxiliares para upload/download
 - `tests/lib/r2-photos.test.ts` — Testes unitários
 
 **Modified files:**
 - `src/scraper/core.ts` — Modificar upload de fotos para usar R2 ao invés de Supabase
 - `src/lib/r2.ts` — Estender para incluir funções genéricas compartilhadas
-- `package.json` — Adicionar script de migração
+- `package.json` — Adicionar scripts de migração, backup, validation
+
+---
+
+## Task 0: Backup e Snapshot Pré-Migração (CRÍTICO)
+
+**Files:**
+- Create: `scripts/snapshot-urls.ts`
+- Create: `scripts/validate-pre-migration.ts`
+- Create: `scripts/test-restore-backup.ts`
+- Create: `backups/migration-2026-06-25/` (pasta)
+
+**Interfaces:**
+- Consumes: Banco de dados (snapshot)
+- Produces: Backup SQL + Snapshot JSON + Validação
+
+⚠️ **ESTE TASK DEVE SER EXECUTADO PRIMEIRO, ANTES DE QUALQUER COISA**
+
+- [ ] **Step 1: Criar pasta de backups**
+
+```bash
+mkdir -p backups/migration-2026-06-25
+```
+
+- [ ] **Step 2: Fazer backup SQL completo**
+
+```bash
+# Substituir credenciais reais
+PGPASSWORD="sua-senha" pg_dump \
+  -h db.yruoiwtnxopcbiiuvxxa.supabase.co \
+  -U postgres \
+  -d postgres \
+  > backups/migration-2026-06-25/pre-migration.sql
+
+# Verificar tamanho (deve ser > 5 MB)
+ls -lh backups/migration-2026-06-25/pre-migration.sql
+```
+
+Esperado: arquivo de vários MB
+
+- [ ] **Step 3: Implementar e rodar snapshot de URLs**
+
+Copiar código de `MIGRATION_ZERO_RISK.md` → `scripts/snapshot-urls.ts`
+
+```bash
+npm run snapshot:urls
+```
+
+Esperado: `backups/migration-2026-06-25/urls-snapshot.json` criado
+
+- [ ] **Step 4: Implementar e rodar validação pré-migração**
+
+Copiar código de `MIGRATION_ZERO_RISK.md` → `scripts/validate-pre-migration.ts`
+
+```bash
+npm run validate:pre-migration
+```
+
+Esperado: Todas as validações passarem (R2 acessível, banco ok, URLs em Supabase)
+
+- [ ] **Step 5: Implementar test de restauração**
+
+Copiar código de `MIGRATION_ZERO_RISK.md` → `scripts/test-restore-backup.ts`
+
+```bash
+npm run test:restore-backup
+```
+
+Esperado: Backup é restaurável (comprovado)
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add scripts/snapshot-urls.ts scripts/validate-pre-migration.ts scripts/test-restore-backup.ts
+git add -f backups/migration-2026-06-25/  # Se quiser versionar backups (opcional, use .gitignore depois)
+git commit -m "feat: add backup, snapshot, and pre-migration validation scripts
+
+- Backup SQL completo em: backups/migration-2026-06-25/pre-migration.sql
+- Snapshot de URLs antes de migração
+- Validação completa pré-migração
+- Test de restauração de backup
+- Zero-risk strategy: todos os scripts têm failsafes"
+```
 
 ---
 
@@ -962,14 +1055,103 @@ git commit -m "docs: add R2 migration reference guide"
 
 ---
 
+## Task 10: Setup de Rollback (Emergência)
+
+**Files:**
+- Create: `scripts/rollback-urls-to-supabase.ts`
+- Create: SQL functions (`revert_thumbnail_urls`, `revert_photos_array`)
+
+**Interfaces:**
+- Consumes: Banco de dados com URLs em R2
+- Produces: Capacidade de reverter para URLs de Supabase
+
+⚠️ **TASK PARA TER À MÃO EM CASO DE EMERGÊNCIA**
+
+- [ ] **Step 1: Implementar script de rollback**
+
+Copiar código de `MIGRATION_ZERO_RISK.md` → `scripts/rollback-urls-to-supabase.ts`
+
+- [ ] **Step 2: Criar SQL functions no banco**
+
+```sql
+-- Conectar ao banco e rodar:
+
+-- Função para reverter thumbnail_url
+CREATE OR REPLACE FUNCTION revert_thumbnail_urls()
+RETURNS void AS $$
+BEGIN
+  UPDATE telegram_indexed_stls
+  SET thumbnail_url = regexp_replace(
+    thumbnail_url,
+    'https://[a-z0-9]+\.r2\.cloudflarestorage\.com/photos/',
+    'https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/telegram/'
+  )
+  WHERE thumbnail_url LIKE '%r2.cloudflarestorage%';
+END;
+$$ LANGUAGE plpgsql;
+
+-- Função para reverter photos array
+CREATE OR REPLACE FUNCTION revert_photos_array()
+RETURNS void AS $$
+BEGIN
+  UPDATE telegram_indexed_stls
+  SET photos = array_agg(
+    CASE 
+      WHEN photo LIKE '%r2.cloudflarestorage%' THEN
+        regexp_replace(
+          photo,
+          'https://[a-z0-9]+\.r2\.cloudflarestorage\.com/photos/',
+          'https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/telegram/'
+        )
+      ELSE photo
+    END
+  )
+  FROM (SELECT unnest(photos) as photo) sub
+  WHERE photo LIKE '%r2.cloudflarestorage%';
+END;
+$$ LANGUAGE plpgsql;
+```
+
+- [ ] **Step 3: Testar rollback script (em dry-mode)**
+
+```bash
+# Criar função de teste que NÃO altera banco
+npm run rollback:urls-to-supabase -- --test-only
+```
+
+Esperado: Script mostra o que faria sem executar
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/rollback-urls-to-supabase.ts
+git commit -m "feat: add emergency rollback script
+
+Permite reverter URLs para Supabase em caso de problema.
+Uso: npm run rollback:urls-to-supabase -- --confirm
+
+AVISO: SÓ use em emergência!"
+```
+
+---
+
 ## Sumário das Tarefas
 
+### Pré-Migração
+- [ ] **Task 0:** Backup e Snapshot ⚠️ CRÍTICO (fazer primeiro)
+
+### Migração Principal
 - [ ] Task 1: Validar credenciais R2
 - [ ] Task 2: Criar função auxiliar `r2-photos.ts`
 - [ ] Task 3: Criar script de backfill de fotos
+- [ ] Task 3.5: **CHECKPOINT** — Verificar arquivos em R2
 - [ ] Task 4: Modificar scraper para R2
 - [ ] Task 5: Criar script de atualização de URLs
+- [ ] Task 5.5: **CHECKPOINT** — Verificar URLs atualizadas
 - [ ] Task 6: Criar script de limpeza Supabase
 - [ ] Task 7: Migrar avatars
 - [ ] Task 8: Validar integridade pós-migração
 - [ ] Task 9: Documentação
+
+### Emergência
+- [ ] **Task 10:** Setup de rollback (ter à mão)
