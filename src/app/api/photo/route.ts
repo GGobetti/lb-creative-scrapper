@@ -1,0 +1,53 @@
+// Proxy de fotos do R2 — necessário porque r2.cloudflarestorage.com requer auth.
+// Recebe: GET /api/photo?key=photos/photo_123.jpg
+// Retorna: a imagem diretamente do R2 com cache de 1 ano.
+
+import { NextRequest, NextResponse } from "next/server";
+import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+
+function getClient() {
+  return new S3Client({
+    region: "auto",
+    endpoint: `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+    credentials: {
+      accessKeyId: process.env.R2_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.R2_SECRET_ACCESS_KEY!,
+    },
+  });
+}
+
+export async function GET(req: NextRequest) {
+  const key = req.nextUrl.searchParams.get("key");
+  if (!key) {
+    return new NextResponse("Missing key", { status: 400 });
+  }
+
+  // Segurança: só permite chaves dentro de photos/ ou avatars/
+  if (!key.startsWith("photos/") && !key.startsWith("avatars/")) {
+    return new NextResponse("Forbidden", { status: 403 });
+  }
+
+  try {
+    const result = await getClient().send(
+      new GetObjectCommand({
+        Bucket: process.env.R2_BUCKET!,
+        Key: key,
+      })
+    );
+
+    const body = result.Body as ReadableStream;
+    return new NextResponse(body, {
+      headers: {
+        "Content-Type": result.ContentType || "image/jpeg",
+        "Cache-Control": "public, max-age=31536000, immutable",
+        "Content-Length": String(result.ContentLength ?? ""),
+      },
+    });
+  } catch (e: any) {
+    if (e.name === "NoSuchKey") {
+      return new NextResponse("Not Found", { status: 404 });
+    }
+    console.error("[api/photo] R2 error:", e.message);
+    return new NextResponse("Error", { status: 500 });
+  }
+}

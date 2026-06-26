@@ -30,10 +30,18 @@ export function isR2PhotosConfigured(): boolean {
   return Boolean(e.accountId && e.accessKeyId && e.secretAccessKey && e.bucket);
 }
 
-/** Retorna a URL pública de um objeto no R2 dado seu key. */
+/**
+ * Retorna a URL de acesso público a um objeto no R2.
+ * Usa o proxy Next.js /api/photo porque r2.cloudflarestorage.com requer auth.
+ * Se R2_PUBLIC_URL estiver definido (domínio customizado ou r2.dev), usa ele diretamente.
+ */
 export function getR2Url(key: string): string {
-  const e = env();
-  return `https://${e.accountId}.r2.cloudflarestorage.com/${e.bucket}/${key}`;
+  const publicBase = process.env.R2_PUBLIC_URL;
+  if (publicBase) {
+    return `${publicBase.replace(/\/$/, "")}/${key}`;
+  }
+  // Proxy interno — funciona sem configuração adicional
+  return `/api/photo?key=${encodeURIComponent(key)}`;
 }
 
 /**
