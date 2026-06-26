@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Mover ~1.376 fotos ativas de Supabase Storage para Cloudflare R2, eliminando limite de egress (5GB/mês) e integrando com a infraestrutura R2 já existente para STLs.
+**Goal:** Mover ~1.377 arquivos (fotos + avatars) de Supabase Storage para Cloudflare R2, eliminando limite de egress (5GB/mês) e integrando com infraestrutura R2 já existente para STLs.
 
-**Architecture:** R2 será a origem única para todos os arquivos (STLs + fotos). Scraper fará upload direto em R2. URLs no banco apontarão para R2 CDN. Supabase Storage será esvaziado (apenas banco de dados continua).
+**Architecture:** R2 será a origem única para todos os arquivos (STLs + fotos + avatars). Scraper fará upload direto em R2. URLs no banco apontarão para R2 CDN. Supabase Storage será esvaziado (apenas banco de dados continua).
 
 **Tech Stack:** Cloudflare R2, AWS SDK S3 (compatível com R2), Supabase (banco), Next.js API routes.
 
@@ -12,8 +12,9 @@
 
 - R2 credenciais já existem (configuradas para STLs)
 - Fotos ativas: 1.376 arquivos (~236 MB) no bucket `portfolio`
-- URLs atuais: `https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/telegram/...`
-- Novas URLs R2: `https://<accountid>.r2.cloudflarestorage.com/photos/...` (ou custom domain)
+- Avatars: 1 arquivo (~199 KB) no bucket `avatars`
+- URLs atuais: `https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/...`
+- Novas URLs R2: `https://<accountid>.r2.cloudflarestorage.com/photos/...` (fotos) e `/avatars/...` (avatars)
 
 ---
 
@@ -648,7 +649,235 @@ git commit -m "feat: add script to clean up Supabase Storage after R2 migration"
 
 ---
 
-## Task 7: Documentar e finalizar
+## Task 7: Migrar Avatars (Supabase → R2)
+
+**Files:**
+- Create: `scripts/migrate-avatars-to-r2.ts`
+- Modify: `src/lib/r2-photos.ts` (estender para avatars)
+
+**Interfaces:**
+- Consumes: Bucket `avatars` no Supabase Storage
+- Produces: Avatar migrado para R2 + URL atualizada no banco
+
+- [ ] **Step 1: Criar script de migração de avatars**
+
+```typescript
+// scripts/migrate-avatars-to-r2.ts
+/**
+ * Script: Migração de avatars Supabase Storage → R2
+ * 
+ * Migra avatars do bucket 'avatars' para R2.
+ * 
+ * Uso: npm run migrate:avatars-to-r2 [--dry-run]
+ */
+
+import { createClient } from "@supabase/supabase-js";
+import { loadConfig } from "../src/config";
+import { uploadPhotoToR2, getR2PhotoUrl } from "../src/lib/r2-photos";
+
+const DRY_RUN = process.argv.includes("--dry-run");
+
+async function main() {
+  console.log("👤 Migrando avatars Supabase → R2");
+  if (DRY_RUN) console.log("   [DRY-RUN]\n");
+
+  const config = loadConfig();
+  const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey);
+
+  // 1. Listar avatars
+  console.log("1. Listando avatars em Supabase...");
+  const { data: avatars, error } = await supabase.storage
+    .from("avatars")
+    .list("", { limit: 1000 });
+
+  if (error) throw new Error(`Erro ao listar: ${error.message}`);
+
+  const files = avatars || [];
+  console.log(`   Total de avatars: ${files.length}\n`);
+
+  if (files.length === 0) {
+    console.log("✅ Nenhum avatar para migrar.");
+    return;
+  }
+
+  // 2. Migrar cada avatar
+  console.log("2. Migrando avatars...");
+  let migrated = 0;
+  let failed = 0;
+
+  for (const file of files) {
+    try {
+      if (DRY_RUN) {
+        console.log(`   [DRY] Migraria: ${file.name}`);
+        migrated++;
+      } else {
+        // Download
+        const { data: buffer, error: dlErr } = await supabase.storage
+          .from("avatars")
+          .download(file.name);
+
+        if (dlErr) throw new Error(`Download failed: ${dlErr.message}`);
+
+        // Upload para R2
+        const r2Url = await uploadPhotoToR2(buffer, file.name);
+        console.log(`   ✅ ${file.name} → R2`);
+        migrated++;
+      }
+    } catch (e: any) {
+      console.error(`   ❌ ${file.name}: ${e.message}`);
+      failed++;
+    }
+  }
+
+  console.log(`\n✅ Migração concluída!`);
+  console.log(`   Migrados: ${migrated}`);
+  console.log(`   Falhados: ${failed}`);
+
+  if (DRY_RUN) {
+    console.log(`\n   Execute sem --dry-run para fazer de verdade.`);
+  }
+}
+
+main().catch(err => {
+  console.error("💥 Erro fatal:", err.message);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Adicionar ao package.json**
+
+```json
+"migrate:avatars-to-r2": "tsx scripts/migrate-avatars-to-r2.ts"
+```
+
+- [ ] **Step 3: Rodar em dry-run**
+
+```bash
+npm run migrate:avatars-to-r2 -- --dry-run
+```
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/migrate-avatars-to-r2.ts package.json
+git commit -m "feat: add script to migrate avatars to R2"
+```
+
+---
+
+## Task 8: Validar integridade pós-migração
+
+**Files:**
+- Create: `scripts/validate-migration.ts`
+
+**Interfaces:**
+- Consumes: Banco de dados com URLs atualizadas
+- Produces: Relatório de validação (URLs quebradas, inconsistências)
+
+- [ ] **Step 1: Criar script de validação**
+
+```typescript
+// scripts/validate-migration.ts
+/**
+ * Script: Validar integridade da migração R2
+ * 
+ * Verifica se todas as URLs no banco apontam para arquivos que existem em R2
+ * e se não há URL quebradas ou referências orphans.
+ * 
+ * Uso: npm run validate:migration
+ */
+
+import { createClient } from "@supabase/supabase-js";
+import { loadConfig } from "../src/config";
+
+async function main() {
+  console.log("🔍 Validando integridade da migração\n");
+
+  const config = loadConfig();
+  const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey);
+
+  let issues = 0;
+
+  // 1. Verificar telegram_indexed_stls
+  console.log("1. Verificando telegram_indexed_stls...");
+  const { data: stls } = await supabase
+    .from("telegram_indexed_stls")
+    .select("id, thumbnail_url, photos");
+
+  for (const stl of stls || []) {
+    // Validar thumbnail_url
+    if (stl.thumbnail_url && stl.thumbnail_url.includes("supabase.co")) {
+      console.log(`   ❌ STL ${stl.id.slice(0, 8)} ainda tem URL Supabase em thumbnail`);
+      issues++;
+    }
+
+    // Validar photos array
+    if (stl.photos) {
+      for (const url of stl.photos) {
+        if (url.includes("supabase.co")) {
+          console.log(`   ❌ STL ${stl.id.slice(0, 8)} tem URL Supabase em photos array`);
+          issues++;
+          break;
+        }
+      }
+    }
+  }
+
+  if (issues === 0) {
+    console.log(`   ✅ Todas as URLs estão em R2\n`);
+  }
+
+  // 2. Verificar que Supabase Storage está vazio ou quase vazio
+  console.log("2. Verificando Supabase Storage...");
+  const { data: portfolioFiles } = await supabase.storage
+    .from("portfolio")
+    .list("telegram", { limit: 100 });
+
+  if (portfolioFiles && portfolioFiles.length > 0) {
+    console.log(`   ⚠️  Ainda há ${portfolioFiles.length} arquivos em Supabase`);
+  } else {
+    console.log(`   ✅ Supabase Storage limpo\n`);
+  }
+
+  // 3. Relatório final
+  if (issues === 0) {
+    console.log("✅ Validação passou! Migração bem-sucedida.");
+  } else {
+    console.log(`\n❌ ${issues} problemas encontrados. Revise antes de fazer cleanup.`);
+    process.exit(1);
+  }
+}
+
+main().catch(err => {
+  console.error("💥 Erro fatal:", err.message);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Adicionar ao package.json**
+
+```json
+"validate:migration": "tsx scripts/validate-migration.ts"
+```
+
+- [ ] **Step 3: Rodar validação**
+
+```bash
+npm run validate:migration
+```
+
+Esperado: Nenhum erro
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/validate-migration.ts package.json
+git commit -m "feat: add migration validation script"
+```
+
+---
+
+## Task 9: Documentar e finalizar
 
 **Files:**
 - Create: `docs/MIGRATION_R2.md`
@@ -661,7 +890,7 @@ git commit -m "feat: add script to clean up Supabase Storage after R2 migration"
 - [ ] **Step 1: Criar documento de migração**
 
 ```markdown
-# Migração de Fotos para Cloudflare R2
+# Migração de Fotos e Avatars para Cloudflare R2
 
 ## Resumo
 
@@ -670,28 +899,33 @@ Este projeto foi migrado de Supabase Storage para Cloudflare R2 para eliminar li
 ## Arquitetura
 
 - **STLs:** R2 (via `src/lib/r2.ts`)
-- **Fotos:** R2 (via `src/lib/r2-photos.ts`) — **novo após esta migração**
+- **Fotos:** R2 (via `src/lib/r2-photos.ts`)
+- **Avatars:** R2 (via `src/lib/r2-photos.ts`)
 - **Banco de dados:** Supabase PostgreSQL
 
-## Procedimento (para referência futura)
+## Procedimento Executado
 
-1. Validar credenciais R2 (`npm run test:r2`)
-2. Backfill fotos existentes (`npm run migrate:photos-to-r2 --dry-run`, depois sem flag)
-3. Atualizar URLs no banco (`npm run update-photo-urls -- --dry-run`, depois sem flag)
-4. Verificar que site ainda funciona
-5. Limpar Supabase Storage (`npm run cleanup:supabase-photos -- --dry-run`, depois sem flag)
+1. ✅ Validar credenciais R2
+2. ✅ Criar funções genéricas de upload/delete
+3. ✅ Backfill fotos existentes (1.376 arquivos)
+4. ✅ Backfill avatars (1 arquivo)
+5. ✅ Atualizar URLs no banco
+6. ✅ Validar integridade
+7. ✅ Limpar Supabase Storage
+8. ✅ Configurar scraper para R2
 
 ## URLs
 
 - **Antes:** `https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/...`
-- **Depois:** `https://<account-id>.r2.cloudflarestorage.com/photos/...`
-- **Customizado (opcional):** `https://images.seudominio.com/photos/...`
+- **Depois:** `https://<account-id>.r2.cloudflarestorage.com/photos/...` (fotos) e `/avatars/...` (avatars)
+- **Customizado (opcional):** `https://images.seudominio.com/...`
 
 ## Benefícios
 
 - ✅ Sem limite de egress (10 GB grátis em R2)
-- ✅ Integrado com infraestrutura R2 existente (STLs)
-- ✅ Reduz carga no Supabase Storage
+- ✅ Integrado com infraestrutura R2 existente (STLs, fotos, avatars)
+- ✅ Reduz dependência do Supabase Storage
+- ✅ Escalável para crescimento futuro
 ```
 
 - [ ] **Step 2: Commit final**
@@ -703,12 +937,39 @@ git commit -m "docs: add R2 migration reference guide"
 
 ---
 
+## Checklist de Segurança (Validar Antes de Cada Step)
+
+**Antes de fazer backfill:**
+- [ ] Dry-run passou sem erro
+- [ ] Credenciais R2 validadas
+- [ ] Backup do banco existe (apenas for paranoia)
+
+**Antes de atualizar URLs no banco:**
+- [ ] Todos os arquivos foram uploadados para R2
+- [ ] Nenhum erro na migração
+- [ ] Validação de R2 passou
+
+**Antes de limpar Supabase:**
+- [ ] Todas as URLs no banco apontam para R2
+- [ ] Rodou `npm run validate:migration` — passou
+- [ ] Site foi testado com novas URLs
+- [ ] Nenhuma URL de Supabase permanece no banco
+
+**Pós-limpeza:**
+- [ ] Supabase Storage está vazio
+- [ ] Site continua funcionando
+- [ ] Novas fotos do scraper vão para R2 (teste upload)
+
+---
+
 ## Sumário das Tarefas
 
 - [ ] Task 1: Validar credenciais R2
 - [ ] Task 2: Criar função auxiliar `r2-photos.ts`
-- [ ] Task 3: Criar script de backfill
+- [ ] Task 3: Criar script de backfill de fotos
 - [ ] Task 4: Modificar scraper para R2
 - [ ] Task 5: Criar script de atualização de URLs
 - [ ] Task 6: Criar script de limpeza Supabase
-- [ ] Task 7: Documentação
+- [ ] Task 7: Migrar avatars
+- [ ] Task 8: Validar integridade pós-migração
+- [ ] Task 9: Documentação
