@@ -1,0 +1,714 @@
+# Migração de Fotos: Supabase Storage → Cloudflare R2
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** Mover ~1.376 fotos ativas de Supabase Storage para Cloudflare R2, eliminando limite de egress (5GB/mês) e integrando com a infraestrutura R2 já existente para STLs.
+
+**Architecture:** R2 será a origem única para todos os arquivos (STLs + fotos). Scraper fará upload direto em R2. URLs no banco apontarão para R2 CDN. Supabase Storage será esvaziado (apenas banco de dados continua).
+
+**Tech Stack:** Cloudflare R2, AWS SDK S3 (compatível com R2), Supabase (banco), Next.js API routes.
+
+## Global Constraints
+
+- R2 credenciais já existem (configuradas para STLs)
+- Fotos ativas: 1.376 arquivos (~236 MB) no bucket `portfolio`
+- URLs atuais: `https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/telegram/...`
+- Novas URLs R2: `https://<accountid>.r2.cloudflarestorage.com/photos/...` (ou custom domain)
+
+---
+
+## File Structure
+
+**New files:**
+- `scripts/migrate-photos-to-r2.ts` — Backfill de fotos existentes (Supabase → R2)
+- `src/lib/r2-photos.ts` — Funções auxiliares para upload/download de fotos em R2 (similar a `r2.ts` mas específico para fotos)
+- `tests/lib/r2-photos.test.ts` — Testes unitários
+
+**Modified files:**
+- `src/scraper/core.ts` — Modificar upload de fotos para usar R2 ao invés de Supabase
+- `src/lib/r2.ts` — Estender para incluir funções genéricas compartilhadas
+- `package.json` — Adicionar script de migração
+
+---
+
+## Task 1: Validar credenciais e configuração R2
+
+**Files:**
+- Modify: `src/lib/r2.ts` (adicionar função genérica)
+- Test: Validação local
+
+**Interfaces:**
+- Consumes: Variáveis de ambiente existentes (`AWS_REGION`, `R2_BUCKET`, etc)
+- Produces: Função `getR2Client()` que retorna cliente S3 configurado para R2
+
+- [ ] **Step 1: Verificar variáveis de ambiente**
+
+Listar `.env` ou `.env.local` para confirmar que R2 já está configurado:
+
+```bash
+grep -E "AWS|R2" /Users/ggobetti/Projetos\ Pessoais/lb-creative-scrapper/.env* 2>/dev/null || echo "Não encontrado — será preciso configurar"
+```
+
+Esperado: Ver `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `R2_BUCKET`, `R2_ACCOUNT_ID`
+
+- [ ] **Step 2: Testar conexão ao R2**
+
+Criar script rápido para validar:
+
+```typescript
+// scripts/test-r2-connection.ts
+import { S3Client, ListBucketsCommand } from "@aws-sdk/client-s3";
+
+const client = new S3Client({
+  region: process.env.AWS_REGION || "auto",
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+  },
+  endpoint: process.env.R2_ENDPOINT || `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+});
+
+const cmd = new ListBucketsCommand({});
+client.send(cmd).then(() => console.log("✅ R2 conectado"))
+  .catch(e => console.error("❌ Erro:", e.message));
+```
+
+Rodar: `tsx scripts/test-r2-connection.ts`
+
+Esperado: "✅ R2 conectado"
+
+---
+
+## Task 2: Criar função auxiliar para fotos em R2
+
+**Files:**
+- Create: `src/lib/r2-photos.ts`
+- Test: `tests/lib/r2-photos.test.ts`
+
+**Interfaces:**
+- Consumes: `@aws-sdk/client-s3`, variáveis de ambiente R2
+- Produces: 
+  - `uploadPhotoToR2(buffer: Buffer, filename: string): Promise<string>` → retorna URL pública
+  - `deletePhotoFromR2(key: string): Promise<void>`
+  - `getR2PhotoUrl(key: string): string` → URL pública sem fazer request
+
+- [ ] **Step 1: Write failing test**
+
+```typescript
+// tests/lib/r2-photos.test.ts
+import { uploadPhotoToR2, deletePhotoFromR2, getR2PhotoUrl } from "../../src/lib/r2-photos";
+
+describe("R2 Photos", () => {
+  it("should upload photo and return public URL", async () => {
+    const buffer = Buffer.from("fake image data");
+    const url = await uploadPhotoToR2(buffer, "test-photo.jpg");
+    expect(url).toMatch(/r2\.cloudflarestorage\.com.*test-photo\.jpg/);
+  });
+
+  it("should generate correct public URL for key", () => {
+    const url = getR2PhotoUrl("photos/test.jpg");
+    expect(url).toContain("r2.cloudflarestorage.com");
+    expect(url).toContain("photos/test.jpg");
+  });
+
+  it("should delete photo from R2", async () => {
+    await expect(deletePhotoFromR2("photos/nonexistent.jpg")).resolves.not.toThrow();
+  });
+});
+```
+
+Run: `npm test -- tests/lib/r2-photos.test.ts`
+
+Esperado: FAIL ("uploadPhotoToR2 is not defined")
+
+- [ ] **Step 2: Implementar função**
+
+```typescript
+// src/lib/r2-photos.ts
+import { S3Client, PutObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+
+const getR2Client = () => {
+  return new S3Client({
+    region: process.env.AWS_REGION || "auto",
+    credentials: {
+      accessKeyId: process.env.AWS_ACCESS_KEY_ID!,
+      secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY!,
+    },
+    endpoint: process.env.R2_ENDPOINT || `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  });
+};
+
+export async function uploadPhotoToR2(buffer: Buffer, filename: string): Promise<string> {
+  const client = getR2Client();
+  const key = `photos/${Date.now()}-${filename}`;
+
+  const cmd = new PutObjectCommand({
+    Bucket: process.env.R2_BUCKET!,
+    Key: key,
+    Body: buffer,
+    ContentType: "image/jpeg",
+  });
+
+  await client.send(cmd);
+  return getR2PhotoUrl(key);
+}
+
+export async function deletePhotoFromR2(key: string): Promise<void> {
+  const client = getR2Client();
+  const cmd = new DeleteObjectCommand({
+    Bucket: process.env.R2_BUCKET!,
+    Key: key,
+  });
+
+  await client.send(cmd);
+}
+
+export function getR2PhotoUrl(key: string): string {
+  const accountId = process.env.R2_ACCOUNT_ID!;
+  const customDomain = process.env.R2_CUSTOM_DOMAIN; // opcional: seu próprio domínio
+  
+  if (customDomain) {
+    return `https://${customDomain}/${key}`;
+  }
+  
+  return `https://${accountId}.r2.cloudflarestorage.com/${key}`;
+}
+```
+
+- [ ] **Step 3: Run tests**
+
+`npm test -- tests/lib/r2-photos.test.ts`
+
+Esperado: PASS
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/lib/r2-photos.ts tests/lib/r2-photos.test.ts
+git commit -m "feat: add R2 photo upload/delete utilities"
+```
+
+---
+
+## Task 3: Criar script de backfill (migrar fotos existentes)
+
+**Files:**
+- Create: `scripts/migrate-photos-to-r2.ts`
+
+**Interfaces:**
+- Consumes: Supabase Storage (fotos), R2 client, banco de dados
+- Produces: Script que migra 1.376 fotos e atualiza URLs no banco
+
+- [ ] **Step 1: Write script skeleton**
+
+```typescript
+// scripts/migrate-photos-to-r2.ts
+/**
+ * Script: Migração de fotos Supabase Storage → R2
+ * 
+ * Lê todas as fotos do bucket 'portfolio' no Supabase,
+ * faz upload para R2, e atualiza as URLs no banco.
+ * 
+ * Uso: npm run migrate:photos-to-r2 [--dry-run]
+ */
+
+import { createClient } from "@supabase/supabase-js";
+import { loadConfig } from "../src/config";
+import { uploadPhotoToR2, getR2PhotoUrl } from "../src/lib/r2-photos";
+import fs from "fs";
+import path from "path";
+
+const BATCH_SIZE = 10; // Processar 10 fotos por vez
+const DRY_RUN = process.argv.includes("--dry-run");
+
+async function main() {
+  console.log("🖼️  Migrando fotos Supabase → R2");
+  if (DRY_RUN) console.log("   [DRY-RUN MODE]\n");
+
+  const config = loadConfig();
+  const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey);
+
+  // 1. Listar todas as fotos em Supabase
+  console.log("1. Listando fotos em Supabase...");
+  const allPhotos: { name: string; url: string }[] = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await supabase.storage
+      .from("portfolio")
+      .list("telegram", { limit: 100, offset });
+
+    if (error) throw new Error(`Erro ao listar: ${error.message}`);
+    if (!data || data.length === 0) break;
+
+    for (const file of data) {
+      const { data: { publicUrl } } = supabase.storage
+        .from("portfolio")
+        .getPublicUrl(`telegram/${file.name}`);
+      allPhotos.push({ name: file.name, url: publicUrl });
+    }
+
+    offset += data.length;
+  }
+
+  console.log(`   Total de fotos: ${allPhotos.length}\n`);
+
+  // 2. Migrar em batches
+  console.log("2. Migrando fotos...");
+  let migrated = 0;
+  let failed = 0;
+
+  for (let i = 0; i < allPhotos.length; i += BATCH_SIZE) {
+    const batch = allPhotos.slice(i, i + BATCH_SIZE);
+
+    for (const photo of batch) {
+      try {
+        if (DRY_RUN) {
+          console.log(`   [DRY] Migraria: ${photo.name}`);
+          migrated++;
+        } else {
+          // Download da Supabase
+          const response = await fetch(photo.url);
+          const buffer = Buffer.from(await response.arrayBuffer());
+
+          // Upload para R2
+          const r2Url = await uploadPhotoToR2(buffer, photo.name);
+          console.log(`   ✅ ${photo.name} → ${r2Url.split("/").pop()}`);
+          migrated++;
+        }
+      } catch (e: any) {
+        console.error(`   ❌ ${photo.name}: ${e.message}`);
+        failed++;
+      }
+    }
+
+    const pct = Math.round((migrated + failed) / allPhotos.length * 100);
+    process.stdout.write(`\r   Progresso: ${migrated + failed}/${allPhotos.length} (${pct}%)`);
+  }
+
+  console.log(`\n\n✅ Migração concluída!`);
+  console.log(`   Migradas: ${migrated}`);
+  console.log(`   Falhadas: ${failed}`);
+
+  if (DRY_RUN) {
+    console.log(`\n   Execute sem --dry-run para fazer a migração de verdade.`);
+  }
+}
+
+main().catch(err => {
+  console.error("💥 Erro fatal:", err.message);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Adicionar script ao package.json**
+
+No `package.json`, adicione:
+
+```json
+"migrate:photos-to-r2": "tsx scripts/migrate-photos-to-r2.ts"
+```
+
+- [ ] **Step 3: Testar em dry-run**
+
+```bash
+npm run migrate:photos-to-r2 -- --dry-run
+```
+
+Esperado: Lista as fotos que seriam migradas, sem fazer nada
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/migrate-photos-to-r2.ts package.json
+git commit -m "feat: add script to backfill photos to R2"
+```
+
+---
+
+## Task 4: Modificar scraper para fazer upload de fotos em R2
+
+**Files:**
+- Modify: `src/scraper/core.ts` (linhas ~348-365)
+
+**Interfaces:**
+- Consumes: `uploadPhotoToR2()` da Task 2
+- Produces: Fotos sendo salvas em R2 ao invés de Supabase Storage
+
+- [ ] **Step 1: Atualizar imports**
+
+No topo de `src/scraper/core.ts`, adicione:
+
+```typescript
+import { uploadPhotoToR2 } from "../lib/r2-photos";
+```
+
+- [ ] **Step 2: Substituir upload de Supabase por R2**
+
+Encontre este trecho (linha ~348-365):
+
+```typescript
+const fileBuffer = fs.readFileSync(downloaded);
+const uploadPath = `telegram/photo_${Date.now()}_${i}.jpg`;
+const { error: upErr } = await this.supabase.storage
+  .from("portfolio")
+  .upload(uploadPath, fileBuffer, { contentType: "image/jpeg", upsert: true });
+
+try { fs.unlinkSync(downloaded); } catch {}
+
+if (upErr) { console.error(`[Core] Erro upload foto: ${upErr.message}`); continue; }
+
+const { data: { publicUrl } } = this.supabase.storage.from("portfolio").getPublicUrl(uploadPath);
+photoUrlsMap.set(photoMsg.id, publicUrl);
+```
+
+Substitua por:
+
+```typescript
+const fileBuffer = fs.readFileSync(downloaded);
+
+try { fs.unlinkSync(downloaded); } catch {}
+
+let publicUrl: string;
+try {
+  publicUrl = await uploadPhotoToR2(fileBuffer, `photo_${Date.now()}_${i}.jpg`);
+  console.log(`[Core] Foto disponível em R2: ${publicUrl}`);
+} catch (e: any) {
+  console.error(`[Core] Erro upload foto para R2: ${e.message}`);
+  continue;
+}
+
+photoUrlsMap.set(photoMsg.id, publicUrl);
+```
+
+- [ ] **Step 3: Testar scraper com nova lógica**
+
+Rode um scan pequeno para validar:
+
+```bash
+npm run scan -- --test
+```
+
+(ou teste manualmente com um grupo pequeno)
+
+Esperado: Fotos sendo uploadadas para R2 ao invés de Supabase
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add src/scraper/core.ts
+git commit -m "refactor: upload photos to R2 instead of Supabase Storage"
+```
+
+---
+
+## Task 5: Atualizar URLs no banco (pós-migração)
+
+**Files:**
+- Create: `scripts/update-photo-urls-in-db.ts`
+
+**Interfaces:**
+- Consumes: Banco de dados com URLs antigas de Supabase
+- Produces: URLs migradas para R2 format
+
+- [ ] **Step 1: Write script para atualizar URLs**
+
+```typescript
+// scripts/update-photo-urls-in-db.ts
+/**
+ * Script: Atualizar URLs de fotos de Supabase → R2
+ * 
+ * Substitui todas as URLs no banco que apontam para Supabase Storage
+ * pelas equivalentes no R2.
+ * 
+ * Uso: npm run update-photo-urls -- --dry-run
+ */
+
+import { createClient } from "@supabase/supabase-js";
+import { loadConfig } from "../src/config";
+import { getR2PhotoUrl } from "../src/lib/r2-photos";
+
+const DRY_RUN = process.argv.includes("--dry-run");
+
+async function main() {
+  console.log("🔄 Atualizando URLs de fotos no banco");
+  if (DRY_RUN) console.log("   [DRY-RUN]\n");
+
+  const config = loadConfig();
+  const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey);
+
+  // 1. Buscar todos os STLs com thumbnail_url do Supabase
+  const { data: stls, error: err1 } = await supabase
+    .from("telegram_indexed_stls")
+    .select("id, thumbnail_url")
+    .like("thumbnail_url", "%supabase.co%");
+
+  if (err1) throw new Error(`Erro ao buscar STLs: ${err1.message}`);
+
+  console.log(`1. Encontrados ${stls?.length || 0} STLs com URLs Supabase\n`);
+
+  let updated = 0;
+
+  // 2. Atualizar thumbnail_url
+  for (const stl of stls || []) {
+    const oldUrl = stl.thumbnail_url;
+    const filename = oldUrl.split("/").pop(); // ex: "photo_1781726163753_7.jpg"
+
+    if (!filename) continue;
+
+    const newUrl = getR2PhotoUrl(`photos/${filename}`);
+
+    if (DRY_RUN) {
+      console.log(`   [DRY] ${filename}`);
+      console.log(`         ${oldUrl}`);
+      console.log(`      → ${newUrl}\n`);
+      updated++;
+    } else {
+      const { error: upErr } = await supabase
+        .from("telegram_indexed_stls")
+        .update({ thumbnail_url: newUrl })
+        .eq("id", stl.id);
+
+      if (upErr) {
+        console.error(`   ❌ ${filename}: ${upErr.message}`);
+      } else {
+        console.log(`   ✅ ${filename}`);
+        updated++;
+      }
+    }
+  }
+
+  // 3. Atualizar photos array
+  console.log(`\n2. Atualizando arrays de fotos...`);
+
+  const { data: allStls } = await supabase
+    .from("telegram_indexed_stls")
+    .select("id, photos")
+    .not("photos", "is", null);
+
+  for (const stl of allStls || []) {
+    if (!stl.photos || stl.photos.length === 0) continue;
+
+    const updatedPhotos = stl.photos.map((url: string) => {
+      if (url.includes("supabase.co")) {
+        const filename = url.split("/").pop();
+        return getR2PhotoUrl(`photos/${filename}`);
+      }
+      return url;
+    });
+
+    const hasChanges = JSON.stringify(updatedPhotos) !== JSON.stringify(stl.photos);
+
+    if (hasChanges) {
+      if (DRY_RUN) {
+        console.log(`   [DRY] STL ${stl.id.slice(0, 8)}: ${stl.photos.length} fotos`);
+        updated++;
+      } else {
+        const { error: upErr } = await supabase
+          .from("telegram_indexed_stls")
+          .update({ photos: updatedPhotos })
+          .eq("id", stl.id);
+
+        if (!upErr) {
+          console.log(`   ✅ STL ${stl.id.slice(0, 8)}: ${stl.photos.length} fotos`);
+          updated++;
+        }
+      }
+    }
+  }
+
+  console.log(`\n✅ Atualização concluída!`);
+  console.log(`   Total de registros atualizados: ${updated}`);
+
+  if (DRY_RUN) {
+    console.log(`\n   Execute sem --dry-run para fazer de verdade.`);
+  }
+}
+
+main().catch(err => {
+  console.error("💥 Erro fatal:", err.message);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Adicionar ao package.json**
+
+```json
+"update-photo-urls": "tsx scripts/update-photo-urls-in-db.ts"
+```
+
+- [ ] **Step 3: Testar em dry-run**
+
+```bash
+npm run update-photo-urls -- --dry-run
+```
+
+Esperado: Mostra quais URLs seriam atualizadas
+
+- [ ] **Step 4: Commit**
+
+```bash
+git add scripts/update-photo-urls-in-db.ts package.json
+git commit -m "feat: add script to update photo URLs in database"
+```
+
+---
+
+## Task 6: Limpar Supabase Storage (após confirmação)
+
+**Files:**
+- Create: `scripts/cleanup-supabase-photos.ts`
+
+**Interfaces:**
+- Consumes: Bucket `portfolio` no Supabase Storage
+- Produces: Bucket vazio (todas as fotos deletadas)
+
+- [ ] **Step 1: Criar script de limpeza pós-migração**
+
+```typescript
+// scripts/cleanup-supabase-photos.ts
+/**
+ * Script: Limpar Supabase Storage após migração para R2
+ * 
+ * Deleta todos os arquivos do bucket 'portfolio' após confirmação
+ * que foram migrados para R2.
+ * 
+ * Uso: npm run cleanup:supabase-photos -- --dry-run
+ */
+
+import { createClient } from "@supabase/supabase-js";
+import { loadConfig } from "../src/config";
+
+const DRY_RUN = process.argv.includes("--dry-run");
+
+async function main() {
+  console.log("🗑️  Limpando Supabase Storage (pós-migração)");
+  if (DRY_RUN) console.log("   [DRY-RUN]\n");
+
+  const config = loadConfig();
+  const supabase = createClient(config.supabase.url, config.supabase.serviceRoleKey);
+
+  // Listar todas as fotos
+  const { data, error } = await supabase.storage
+    .from("portfolio")
+    .list("telegram", { limit: 1000 });
+
+  if (error) throw new Error(`Erro ao listar: ${error.message}`);
+
+  const files = data?.map(f => `telegram/${f.name}`) || [];
+
+  console.log(`Total de fotos a deletar: ${files.length}\n`);
+
+  if (DRY_RUN) {
+    console.log(`   [DRY] Deletaria ${files.length} arquivos`);
+  } else {
+    if (files.length > 0) {
+      const { error: delErr } = await supabase.storage
+        .from("portfolio")
+        .remove(files);
+
+      if (delErr) throw new Error(`Erro ao deletar: ${delErr.message}`);
+      console.log(`   ✅ ${files.length} arquivos deletados`);
+    }
+  }
+
+  console.log("\n✅ Limpeza concluída!");
+}
+
+main().catch(err => {
+  console.error("💥 Erro fatal:", err.message);
+  process.exit(1);
+});
+```
+
+- [ ] **Step 2: Adicionar ao package.json**
+
+```json
+"cleanup:supabase-photos": "tsx scripts/cleanup-supabase-photos.ts"
+```
+
+- [ ] **Step 3: Testar em dry-run APÓS confirmar URLs foram atualizadas**
+
+```bash
+npm run cleanup:supabase-photos -- --dry-run
+```
+
+- [ ] **Step 4: Executar limpeza real (após confirmação)**
+
+```bash
+npm run cleanup:supabase-photos
+```
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/cleanup-supabase-photos.ts package.json
+git commit -m "feat: add script to clean up Supabase Storage after R2 migration"
+```
+
+---
+
+## Task 7: Documentar e finalizar
+
+**Files:**
+- Create: `docs/MIGRATION_R2.md`
+- Modify: `README.md` (se aplicável)
+
+**Interfaces:**
+- Consumes: Conhecimento do processo completo
+- Produces: Documentação para futuro
+
+- [ ] **Step 1: Criar documento de migração**
+
+```markdown
+# Migração de Fotos para Cloudflare R2
+
+## Resumo
+
+Este projeto foi migrado de Supabase Storage para Cloudflare R2 para eliminar limite de egress (5 GB/mês).
+
+## Arquitetura
+
+- **STLs:** R2 (via `src/lib/r2.ts`)
+- **Fotos:** R2 (via `src/lib/r2-photos.ts`) — **novo após esta migração**
+- **Banco de dados:** Supabase PostgreSQL
+
+## Procedimento (para referência futura)
+
+1. Validar credenciais R2 (`npm run test:r2`)
+2. Backfill fotos existentes (`npm run migrate:photos-to-r2 --dry-run`, depois sem flag)
+3. Atualizar URLs no banco (`npm run update-photo-urls -- --dry-run`, depois sem flag)
+4. Verificar que site ainda funciona
+5. Limpar Supabase Storage (`npm run cleanup:supabase-photos -- --dry-run`, depois sem flag)
+
+## URLs
+
+- **Antes:** `https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/...`
+- **Depois:** `https://<account-id>.r2.cloudflarestorage.com/photos/...`
+- **Customizado (opcional):** `https://images.seudominio.com/photos/...`
+
+## Benefícios
+
+- ✅ Sem limite de egress (10 GB grátis em R2)
+- ✅ Integrado com infraestrutura R2 existente (STLs)
+- ✅ Reduz carga no Supabase Storage
+```
+
+- [ ] **Step 2: Commit final**
+
+```bash
+git add docs/MIGRATION_R2.md
+git commit -m "docs: add R2 migration reference guide"
+```
+
+---
+
+## Sumário das Tarefas
+
+- [ ] Task 1: Validar credenciais R2
+- [ ] Task 2: Criar função auxiliar `r2-photos.ts`
+- [ ] Task 3: Criar script de backfill
+- [ ] Task 4: Modificar scraper para R2
+- [ ] Task 5: Criar script de atualização de URLs
+- [ ] Task 6: Criar script de limpeza Supabase
+- [ ] Task 7: Documentação
