@@ -17,17 +17,20 @@
 - URLs R2: `https://<accountid>.r2.cloudflarestorage.com/lb-stls/photos/<filename>`
 - pasta `telegram/manual/` no Supabase preservada — contém 5 STLs manuais (UUIDs)
 
-## Status de Execução (2026-06-26)
+## Status de Execução — ✅ CONCLUÍDA (2026-06-26)
 
 - [x] Task 0: Snapshot de URLs (`backups/migration-2026-06-25/urls-snapshot.json`) ✅
 - [x] Task 2: `src/lib/r2-photos.ts` criado ✅
 - [x] Task 3: 1.377 fotos migradas para R2 ✅
 - [x] Task 4: `src/scraper/core.ts` modificado — novas fotos vão para R2 ✅
 - [x] Task 5: URLs no banco atualizadas (937 thumbnails + 936 arrays) ✅
+- [x] Task 5b: URLs convertidas para formato proxy `/api/photo?key=photos%2F...` ✅
 - [x] Task 6: Supabase Storage limpo (1.269 arquivos deletados) ✅
 - [x] Validação: `npm run validate:migration` — PASSOU ✅
-- [ ] Task 7: Migrar avatars (bucket `avatars`) — pendente
-- [ ] Task 10: Script de rollback — pendente (não necessário se tudo ok)
+- [x] Proxy `/api/photo` adicionado em `lb-creative-scrapper` e `lb-creative-studio` ✅
+- [x] Site em produção carregando fotos corretamente ✅
+- [~] Task 7: Avatars — avatar existente é de perfil de usuário (Supabase Auth), fora do escopo
+- [~] Task 10: Rollback — não necessário, migração estável
 
 ---
 

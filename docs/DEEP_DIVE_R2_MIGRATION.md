@@ -1,200 +1,143 @@
 # Deep Dive: Migração de Fotos para Cloudflare R2
 
-## O Problema Atual
-
-### Limite de Egress (Banda de Download)
-
-O projeto está excedendo o limite de egress do Supabase:
-
-```
-Egress: 5.132 / 5 GB (103%) ❌
-Cached Egress: 4.184 / 5 GB (84%)
-```
-
-**O que é Egress?**
-- Dados que saem do servidor (downloads de fotos)
-- Quando um usuário acessa o site, o navegador faz requisição às URLs das fotos
-- Cada download consome egress
-
-**Exemplo:**
-- 1.376 fotos ativas × ~116 KB média = ~159 MB de dados
-- Se cada foto é visualizada ~20x por mês = ~3.2 GB de egress
-- + bots, crawlers, embeds em redes sociais = fácil atingir 5+ GB/mês
-
-**No Supabase Storage (Free Tier):**
-- Storage: 1 GB (temos 236 MB — OK)
-- Egress: 2 GB/mês (excedemos em 103%)
-- Quando passa do limite = bloqueado ou cobrado
+## Status: ✅ CONCLUÍDA (2026-06-26)
 
 ---
 
-## A Solução: Cloudflare R2
+## O Problema Original
 
-### Por que R2?
+Supabase Storage atingiu 103% do limite de egress (5.132 GB / 5 GB). O site ficou com as fotos bloqueadas.
 
-| Característica | Supabase Storage | Cloudflare R2 |
+```
+Storage: 236 MB / 1 GB     ← ok
+Egress:  5.132 GB / 2 GB   ← BLOQUEADO (103%)
+```
+
+**Causa:** cada acesso ao site faz download das fotos via Supabase, consumindo egress. Com bots, crawlers e usuários reais, 5 GB/mês é ultrapassado facilmente.
+
+---
+
+## A Solução Implementada
+
+### Arquitetura atual
+
+```
+Antes:
+  Browser → Supabase Storage (egress limitado, pago)
+
+Depois:
+  Browser → /api/photo (Next.js proxy) → R2 (egress zero, gratuito)
+```
+
+### Por que proxy Next.js e não URL direta do R2?
+
+R2 tem dois endpoints:
+
+| Endpoint | Formato | Autenticação |
 |---|---|---|
-| **Limite de Egress** | 2 GB/mês | Ilimitado ∞ |
-| **Preço Egress** | Bloqueado no free tier | Grátis |
-| **Armazenamento** | 1 GB | 10 GB |
-| **Preço armazenamento** | Grátis | Grátis (até 10 GB) |
-| **CDN** | Sim | Sim (com Cloudflare) |
-| **S3 Compatible** | Não | Sim (AWS SDK funciona) |
+| `r2.cloudflarestorage.com` | S3 API | Obrigatória — não serve arquivos publicamente |
+| `pub-xxx.r2.dev` | CDN público | Opcional — precisa ativar no dashboard Cloudflare |
 
-**Vencedor:** R2 é perfeito para este projeto.
+Usamos o proxy porque o `r2.dev` exporia **também os STLs** (que estão no mesmo bucket `lb-stls`) a qualquer pessoa com o URL direto — bypassando o sistema de créditos.
 
-### Infraestrutura Atual
-
-O código **já usa R2** para arquivos STL:
-
-```typescript
-// src/scraper/core.ts
-if (isR2Configured()) {
-  r2ObjectKey = `stl/${fileHash}.${ext}`;
-  await uploadToR2(r2ObjectKey, mediaData, fileName);
-}
-```
-
-**Problema:** Fotos ainda estão em Supabase Storage.
+**Trade-off:** fotos passam pelo Next.js server na primeira requisição, depois são cacheadas pelo CDN da Vercel por 1 ano (`Cache-Control: public, max-age=31536000, immutable`). Na prática não tem custo relevante.
 
 ---
 
-## Plano da Migração
+## O Que Foi Feito
 
-### Fase 1: Preparação
+### 1. Limpeza de órfãos (pré-migração)
+Deletados **20.967 arquivos** órfãos do Supabase Storage — fotos que tinham sido uploadadas mas cujo STL nunca foi criado. Storage caiu de 2.6 GB → 236 MB.
 
-1. **Validar credenciais R2** — confirmar que AWS SDK está configurado
-2. **Criar funções genéricas** — `uploadPhotoToR2()`, `deletePhotoFromR2()`, etc
-3. **Adicionar testes** — garantir que o upload funciona
+### 2. Snapshot de segurança
+`backups/migration-2026-06-25/urls-snapshot.json` — snapshot de todas as URLs antes de qualquer alteração (971 thumbnails, 1498 URLs em arrays).
 
-### Fase 2: Migração de Fotos Existentes
+### 3. Migração de fotos para R2
+**1.377 de 1.402 fotos** migradas de `portfolio/telegram/` (Supabase) → `photos/` (R2 bucket `lb-stls`).
 
-4. **Backfill** — copiar 1.376 fotos de Supabase → R2
-5. **Atualizar banco** — trocar URLs no banco de Supabase → R2
-6. **Validar** — testar que site continua funcionando
+As 25 que falharam com HTTP 400 já eram órfãs — não existiam no Supabase, só as referências no banco.
 
-### Fase 3: Novas Fotos
+### 4. Atualização do banco
+- **937 `thumbnail_url`** atualizadas: `supabase.co/.../photo_xxx.jpg` → `/api/photo?key=photos%2Fphoto_xxx.jpg`
+- **936 arrays `photos`** atualizados com o mesmo padrão
 
-7. **Modificar scraper** — fazer upload de novas fotos em R2 ao invés de Supabase
-8. **Limpar Supabase** — deletar fotos antigas (opcional, mas recomendado)
+### 5. Limpeza do Supabase Storage
+**1.269 arquivos** deletados de `portfolio/telegram/`. O que sobrou:
+- `portfolio/telegram/manual/` — 5 STLs com UUID, uploadados manualmente. **Preservados intencionalmente.**
 
-### Fase 4: Documentação
+### 6. Proxy de fotos (`/api/photo`)
+Criado em **dois repos** (ambos precisam ter a rota):
+- `lb-creative-scrapper/src/app/api/photo/route.ts` — dashboard/scraper
+- `lb-creative-studio/src/app/api/photo/route.ts` — site público (o que o Vercel deploya)
 
-9. **Documentar processo** — para referência futura
+### 7. Scraper atualizado
+`src/scraper/core.ts` agora faz upload de **novas fotos direto para R2** (não mais Supabase). Usa `uploadPhotoToR2()` de `src/lib/r2-photos.ts`.
 
 ---
 
-## Mudanças de URL
-
-### Antes (Supabase Storage)
+## Estrutura de Arquivos no R2 (bucket `lb-stls`)
 
 ```
-https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/telegram/photo_1781726163753_7.jpg
-```
-
-### Depois (Cloudflare R2)
-
-```
-https://<account-id>.r2.cloudflarestorage.com/photos/photo_1781726163753_7.jpg
-```
-
-**Ou com domínio customizado (opcional):**
-
-```
-https://images.seu-dominio.com/photos/photo_1781726163753_7.jpg
+lb-stls/
+  stl/        ← arquivos STL (já existia, não mudou)
+  photos/     ← fotos dos modelos (migradas aqui)
+  avatars/    ← não migrado (avatar é de perfil de usuário, sistema de auth)
 ```
 
 ---
 
-## Impacto no Código
+## URLs
 
-### Novos Arquivos
+| Tipo | Formato |
+|---|---|
+| Antes (Supabase) | `https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/telegram/photo_xxx.jpg` |
+| Depois (proxy) | `/api/photo?key=photos%2Fphoto_xxx.jpg` |
+| Upgrade futuro | `https://pub-xxx.r2.dev/photos/photo_xxx.jpg` (se separar bucket de STLs) |
 
+---
+
+## Upgrade Futuro (opcional)
+
+Para servir fotos **direto pelo CDN da Cloudflare** sem passar pelo Next.js:
+
+1. Criar bucket separado `lb-photos` (só fotos, sem STLs)
+2. Habilitar **Public Access** no Cloudflare Dashboard → R2 → `lb-photos` → Settings
+3. Obter URL `pub-xxx.r2.dev`
+4. Adicionar `R2_PUBLIC_URL=https://pub-xxx.r2.dev` no Vercel
+5. A função `getR2Url()` em `src/lib/r2-photos.ts` já usa essa variável automaticamente
+
+Sem esse upgrade, o proxy Next.js funciona corretamente — apenas com um hop extra no servidor.
+
+---
+
+## Scripts de Manutenção
+
+```bash
+npm run snapshot:urls           # Snapshot de URLs (usar antes de migrations)
+npm run migrate:photos-to-r2    # Backfill fotos Supabase → R2 (--dry-run disponível)
+npm run update-photo-urls       # Atualizar URLs no banco (--dry-run disponível)
+npm run validate:migration      # Verificar que nenhuma URL ainda aponta pra Supabase
+npm run cleanup:supabase-photos # Deletar fotos do Supabase Storage (após validação)
+npm run cleanup:orphans         # Deletar fotos órfãs do Supabase (sem STL associado)
 ```
-src/lib/r2-photos.ts          ← Funções para fotos em R2
-scripts/migrate-photos-to-r2.ts ← Backfill
-scripts/update-photo-urls-in-db.ts ← Atualizar URLs no banco
-scripts/cleanup-supabase-photos.ts ← Limpeza final
-tests/lib/r2-photos.test.ts   ← Testes
+
+---
+
+## Rollback de Emergência
+
+O snapshot `backups/migration-2026-06-25/urls-snapshot.json` tem todas as URLs originais.
+
+Para reverter URLs no banco (as fotos ainda estão em R2, só muda para onde o banco aponta):
+
+```sql
+-- Reverter thumbnails
+UPDATE telegram_indexed_stls
+SET thumbnail_url = regexp_replace(
+  thumbnail_url,
+  '/api/photo\?key=photos%2F',
+  'https://yruoiwtnxopcbiiuvxxa.supabase.co/storage/v1/object/public/portfolio/telegram/'
+)
+WHERE thumbnail_url LIKE '/api/photo%';
 ```
 
-### Arquivos Modificados
-
-```
-src/scraper/core.ts  ← Mudar upload de Supabase para R2 (linhas ~348-365)
-package.json        ← Adicionar scripts npm
-```
-
----
-
-## Benefícios Esperados
-
-### Antes
-- ❌ Bloqueado em egress (5 GB > 2 GB free tier)
-- ❌ Storage ocupando 236 MB do free tier
-- ❌ Scraper e site usando serviços diferentes (STL em R2, fotos em Supabase)
-
-### Depois
-- ✅ Sem limite de egress (R2 ilimitado)
-- ✅ Storage centralizado em R2 (10 GB grátis)
-- ✅ Scraper e site usando uma única infraestrutura (tudo em R2)
-- ✅ Reduz dependência do Supabase Storage
-- ✅ Mais escalável e barato no futuro
-
----
-
-## Cronograma Recomendado
-
-1. **Task 1-2** (Prep): ~30 min
-   - Validar R2
-   - Criar funções + testes
-
-2. **Task 3** (Backfill): ~30 min
-   - Criar e testar script de migração
-   - Executar migrate (takes ~5-10 min para 1.376 fotos)
-
-3. **Task 4-5** (Update): ~20 min
-   - Atualizar scraper
-   - Atualizar URLs no banco
-
-4. **Task 6-7** (Cleanup): ~10 min
-   - Limpar Supabase
-   - Documentar
-
-**Total: ~1.5-2 horas de trabalho**
-
----
-
-## Checklist de Validação
-
-Após cada fase, validar:
-
-- [ ] Script de backfill roda em dry-run sem erro
-- [ ] Fotos são uploadadas para R2 com sucesso
-- [ ] URLs no banco são atualizadas corretamente
-- [ ] Site carrega fotos normalmente (testar em navegador)
-- [ ] Novas fotos do scraper vão para R2 (não Supabase)
-- [ ] Supabase Storage está vazio ou quase vazio
-
----
-
-## Rollback Plan (se der ruim)
-
-Se algo der errado durante a migração:
-
-1. **Fotos Supabase não foram deletadas** → ainda tem cópia lá
-2. **URLs no banco ainda apontam para Supabase** → revert o script de update
-3. **Scraper tentando upload em R2 mas credenciais erradas** → reverte para Supabase no código
-
-Basicamente, a migração é **reversível** até o passo final (cleanup).
-
----
-
-## Próximos Passos
-
-1. Revisar este documento com o time
-2. Iniciar Task 1 (validação de credenciais)
-3. Executar tasks em sequência
-4. Validar cada fase antes de prosseguir
-
-Plano completo: [docs/superpowers/plans/2026-06-25-migrate-photos-r2.md](./superpowers/plans/2026-06-25-migrate-photos-r2.md)
+> ⚠️ Reverter URLs para Supabase só faz sentido se as fotos ainda existirem lá. Após a limpeza de 2026-06-26, elas não existem mais no Supabase.
