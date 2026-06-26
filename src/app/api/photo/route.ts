@@ -4,6 +4,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import { Readable } from "stream";
 
 function getClient() {
   return new S3Client({
@@ -35,12 +36,18 @@ export async function GET(req: NextRequest) {
       })
     );
 
-    const body = result.Body as ReadableStream;
-    return new NextResponse(body, {
+    // AWS SDK v3 retorna Node.js Readable, não Web ReadableStream
+    const chunks: Buffer[] = [];
+    for await (const chunk of result.Body as Readable) {
+      chunks.push(Buffer.from(chunk));
+    }
+    const buffer = Buffer.concat(chunks);
+
+    return new NextResponse(buffer, {
       headers: {
         "Content-Type": result.ContentType || "image/jpeg",
         "Cache-Control": "public, max-age=31536000, immutable",
-        "Content-Length": String(result.ContentLength ?? ""),
+        "Content-Length": String(buffer.length),
       },
     });
   } catch (e: any) {
