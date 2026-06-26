@@ -611,11 +611,11 @@ export function ScraperMonitor() {
                                   {actingJobId === job.id ? <Loader2 size={12} className="animate-spin inline" /> : "✕ Cancelar"}
                                 </button>
                               )}
-                              {job.status === "failed" && (
+                              {(job.status === "failed" || job.status === "cancelled") && (
                                 <button
                                   onClick={() => handleRetryJob(job.id)}
                                   disabled={actingJobId === job.id}
-                                  title="Reiniciar download"
+                                  title={job.status === "cancelled" ? "Reiniciar processamento" : "Reiniciar download"}
                                   className="px-2 py-1 text-xs bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 border border-amber-500/20 rounded transition-all disabled:opacity-50 cursor-pointer"
                                 >
                                   {actingJobId === job.id ? <Loader2 size={12} className="animate-spin inline" /> : "↻ Retry"}

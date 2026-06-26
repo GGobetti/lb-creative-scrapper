@@ -17,6 +17,13 @@ const STOP_WORDS = new Set([
   "planter","download","gratis","completo","link","key","v2",
 ]);
 
+class CancellationError extends Error {
+  constructor() {
+    super("Job foi cancelado");
+    this.name = "CancellationError";
+  }
+}
+
 function withTimeout<T>(promise: Promise<T>, ms: number, msg: string): Promise<T> {
   let tid: NodeJS.Timeout;
   const timeout = new Promise<never>((_, reject) => {
@@ -142,6 +149,21 @@ export class ScraperCore {
     }
   }
 
+  private async checkJobCancelled(jobId: string): Promise<boolean> {
+    if (!jobId) return false;
+    try {
+      const { data, error } = await this.supabase
+        .from("telegram_scraper_jobs")
+        .select("status")
+        .eq("id", jobId)
+        .single();
+      if (error) return false;
+      return data?.status === "cancelled";
+    } catch {
+      return false;
+    }
+  }
+
   private async downloadMediaWithTimeout(
     client: TelegramClient,
     message: any,
@@ -153,8 +175,18 @@ export class ScraperCore {
     let completed = false;
 
     return new Promise<string>((resolve, reject) => {
-      const checkInterval = setInterval(() => {
+      const checkInterval = setInterval(async () => {
         if (completed) return;
+
+        // Verifica se job foi cancelado
+        if (jobId && await this.checkJobCancelled(jobId)) {
+          clearInterval(checkInterval);
+          completed = true;
+          try { if (fs.existsSync(outputFile)) fs.unlinkSync(outputFile); } catch {}
+          reject(new CancellationError());
+          return;
+        }
+
         if (Date.now() - lastProgress > timeoutMs) {
           clearInterval(checkInterval);
           completed = true;
@@ -509,6 +541,11 @@ export class ScraperCore {
         const title = this.formatTitle(fileName);
         const hashtagStr = tags.map(t => `#${t}`).join(" ");
 
+        // Verificar se foi cancelado antes de prosseguir
+        if (jobId && await this.checkJobCancelled(jobId)) {
+          throw new CancellationError();
+        }
+
         // Armazém: Cloudflare R2 (alvo) ou Telegram Vault (legado/fallback se R2 não configurado)
         await updateJob("uploading_vault");
         let r2ObjectKey: string | null = null;
@@ -533,6 +570,11 @@ export class ScraperCore {
             25 * 60_000,
             "Timeout ao enviar para Vault (25min)"
           );
+        }
+
+        // Verificar se foi cancelado antes de indexar
+        if (jobId && await this.checkJobCancelled(jobId)) {
+          throw new CancellationError();
         }
 
         await updateJob("indexing");
@@ -630,9 +672,17 @@ export class ScraperCore {
           console.log(`[Core] ✅ "${fileName}" indexado com sucesso!`);
         }
       } catch (e: any) {
+        // Job foi cancelado pelo usuário
+        if (e instanceof CancellationError) {
+          console.warn(`[Core] 🛑 "${fileName}" - download cancelado pelo usuário`);
+          await updateJob("cancelled");
+          if (tempFilePath && fs.existsSync(tempFilePath)) {
+            try { fs.unlinkSync(tempFilePath); } catch {}
+          }
+        }
         // Ignorar erro de canal não encontrado (arquivo encaminhado de canal inacessível)
         // O arquivo foi baixado com sucesso, apenas metadados do canal falharam
-        if (e.message?.includes("Could not find the input entity") ||
+        else if (e.message?.includes("Could not find the input entity") ||
             e.message?.includes("CHANNEL_INVALID")) {
           console.warn(`[Core] ⚠️  "${fileName}" - canal de origem inacessível (ignorando erro)`);
           // Continua o processamento normalmente
@@ -704,6 +754,11 @@ export class ScraperCore {
         const title = this.formatTitle(fileName);
         const hashtagStr = tags.map(t => `#${t}`).join(" ");
 
+        // Verificar se foi cancelado antes de prosseguir
+        if (await this.checkJobCancelled(job.id)) {
+          throw new CancellationError();
+        }
+
         await updateJob("uploading_vault");
         let r2ObjectKey: string | null = null;
         let telegramMessageId: number = job.telegram_message_id;
@@ -722,6 +777,11 @@ export class ScraperCore {
             25 * 60_000,
             "Timeout ao enviar para Vault (25min)"
           );
+        }
+
+        // Verificar se foi cancelado antes de indexar
+        if (await this.checkJobCancelled(job.id)) {
+          throw new CancellationError();
         }
 
         await updateJob("indexing");
@@ -761,7 +821,13 @@ export class ScraperCore {
           console.log(`[Core] ✅ "${fileName}" (aprovado) indexado com sucesso!`);
         }
       } catch (e: any) {
-        await updateJob("failed", e.message);
+        // Job foi cancelado pelo usuário
+        if (e instanceof CancellationError) {
+          console.warn(`[Core] 🛑 "${fileName}" - job aprovado cancelado pelo usuário`);
+          await updateJob("cancelled");
+        } else {
+          await updateJob("failed", e.message);
+        }
         if (tempFilePath && fs.existsSync(tempFilePath)) {
           try { fs.unlinkSync(tempFilePath); } catch {}
         }
