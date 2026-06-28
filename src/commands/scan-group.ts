@@ -177,6 +177,13 @@ export async function scanGroupCommand(args: { groupId: string; hours?: number }
 
     core.saveHashCache();
 
+    // Atualizar heartbeat
+    const supabaseHeartbeat = createClient(config.supabase.url, config.supabase.serviceRoleKey);
+    await supabaseHeartbeat
+      .from("telegram_scraper_settings")
+      .update({ last_heartbeat: new Date().toISOString() })
+      .eq("id", "default");
+
     console.log(`\n✅ Scan concluído!`);
     console.log(`   📥 ${totalQueued} arquivo(s) processado(s)\n`);
 
