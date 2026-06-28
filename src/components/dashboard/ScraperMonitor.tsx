@@ -24,6 +24,7 @@ export function ScraperMonitor() {
   const [scraperSettings, setScraperSettings] = useState<{ size_limit_mb: number; last_heartbeat?: string; max_concurrent_downloads?: number } | null>(null)
   const [scraperHeartbeat, setScraperHeartbeat] = useState<string | null>(null)
   const [maxConcurrentDownloads, setMaxConcurrentDownloads] = useState<number>(5)
+  const [sizeLimitMb, setSizeLimitMb] = useState<number>(750)
   const [statusFilter, setStatusFilter] = useState<string | null>(null)
   const [isRefreshing, setIsRefreshing] = useState(false)
   const [activeTab, setActiveTab] = useState<TabType>("history")
@@ -66,6 +67,7 @@ export function ScraperMonitor() {
       setScraperSettings(data)
       setScraperHeartbeat(data?.last_heartbeat || null)
       setMaxConcurrentDownloads(data?.max_concurrent_downloads || 5)
+      setSizeLimitMb(data?.size_limit_mb || 750)
     } catch (err) {
       console.error("Erro ao carregar configurações:", err)
     }
@@ -916,12 +918,37 @@ export function ScraperMonitor() {
                 <div className="space-y-6">
                   <div>
                     <label className="text-sm font-bold text-foreground block mb-2">Limite de arquivo (MB)</label>
-                    <input
-                      type="number"
-                      defaultValue={scraperSettings?.size_limit_mb || 750}
-                      disabled
-                      className="w-full px-4 py-2 rounded-lg border border-border bg-muted/30 text-foreground text-sm disabled:opacity-50"
-                    />
+                    <div className="flex items-center gap-4">
+                      <input
+                        type="number"
+                        min="1"
+                        value={sizeLimitMb}
+                        onChange={(e) => setSizeLimitMb(Math.max(1, parseInt(e.target.value) || 750))}
+                        className="flex-1 px-4 py-2 rounded-lg border border-border bg-card text-foreground text-sm"
+                      />
+                      <button
+                        onClick={async () => {
+                          try {
+                            const response = await fetch("/api/settings", {
+                              method: "PUT",
+                              headers: { "Content-Type": "application/json" },
+                              body: JSON.stringify({ size_limit_mb: sizeLimitMb })
+                            })
+                            if (response.ok) {
+                              alert(`Limite atualizado para ${sizeLimitMb} MB`)
+                              await fetchSettings()
+                            } else {
+                              alert("Erro ao atualizar configuração")
+                            }
+                          } catch (err) {
+                            alert("Erro ao salvar configuração")
+                          }
+                        }}
+                        className="px-4 py-2 bg-primary text-primary-foreground text-sm font-bold rounded-lg hover:bg-primary/80 transition-all cursor-pointer"
+                      >
+                        Salvar
+                      </button>
+                    </div>
                     <p className="text-xs text-muted-foreground mt-2">Arquivos acima deste limite aguardam aprovação</p>
                   </div>
 

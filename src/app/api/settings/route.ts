@@ -34,18 +34,26 @@ export async function GET() {
 export async function PUT(request: NextRequest) {
   try {
     const body = await request.json();
-    const { max_concurrent_downloads } = body;
+    const { max_concurrent_downloads, size_limit_mb } = body;
 
-    if (max_concurrent_downloads === undefined) {
+    const updates: any = {};
+    if (max_concurrent_downloads !== undefined) {
+      updates.max_concurrent_downloads = max_concurrent_downloads;
+    }
+    if (size_limit_mb !== undefined) {
+      updates.size_limit_mb = size_limit_mb;
+    }
+
+    if (Object.keys(updates).length === 0) {
       return NextResponse.json(
-        { error: "max_concurrent_downloads é obrigatório" },
+        { error: "Nenhum campo para atualizar" },
         { status: 400 }
       );
     }
 
     const { error } = await supabase
       .from("telegram_scraper_settings")
-      .update({ max_concurrent_downloads })
+      .update(updates)
       .eq("id", "default");
 
     if (error) throw error;
