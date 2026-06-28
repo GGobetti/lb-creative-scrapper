@@ -448,12 +448,6 @@ export class ScraperCore {
         if (attr) fileName = attr.fileName;
         const fileSize = Number(doc.size);
 
-        // Validação ANTES de criar job: arquivo DEVE ter pelo menos 1 foto
-        if (matchedPhotos.length === 0) {
-          console.log(`[Core] ⚠️  "${fileName}" rejeitado - sem fotos (não criou job)`);
-          continue;
-        }
-
         // Verificar duplicata no índice (apenas arquivos NÃO deletados)
         let existing = null;
         try {
@@ -499,6 +493,12 @@ export class ScraperCore {
               printer_type: printerType,
             });
           console.log(`[Core] 🛡️  "${fileName}" (${(fileSize / 1024 / 1024).toFixed(0)}MB) acima do limite → pending_approval`);
+          continue;
+        }
+
+        // Validação ANTES de processar: arquivo abaixo do limite DEVE ter pelo menos 1 foto
+        if (matchedPhotos.length === 0) {
+          console.log(`[Core] ⚠️  "${fileName}" rejeitado - sem fotos (não criou job)`);
           continue;
         }
 

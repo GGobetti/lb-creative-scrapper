@@ -57,6 +57,7 @@ async function main() {
       .is("r2_object_key", null)
       .eq("is_deleted", false)
       .not("telegram_message_id", "is", null)
+      .neq("telegram_message_id", 0)
       .limit(PAGE);
 
     if (error) { console.error(`❌ Erro no Supabase: ${error.message}`); break; }
